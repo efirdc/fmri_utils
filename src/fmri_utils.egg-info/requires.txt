@@ -1,0 +1,10 @@
+numpy
+scipy
+pandas
+nibabel
+nilearn
+matplotlib
+seaborn
+scikit-learn
+tqdm
+fire

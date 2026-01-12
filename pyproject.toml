@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fmri-utils"
+version = "0.1.0"
+description = "Reusable fMRI utilities (second-level analysis, fMRIPrep-based transforms, decoding helpers)."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+  "numpy",
+  "scipy",
+  "pandas",
+  "nibabel",
+  "nilearn",
+  "matplotlib",
+  "seaborn",
+  "scikit-learn",
+  "tqdm",
+  "fire",
+]
+
+[project.scripts]
+fmri-second-level = "fmri_utils.second_level_analysis:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+

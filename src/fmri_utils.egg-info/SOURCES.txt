@@ -1,0 +1,13 @@
+README.md
+pyproject.toml
+src/fmri_utils/__init__.py
+src/fmri_utils/decoding.py
+src/fmri_utils/metrics.py
+src/fmri_utils/second_level_analysis.py
+src/fmri_utils/transformations.py
+src/fmri_utils.egg-info/PKG-INFO
+src/fmri_utils.egg-info/SOURCES.txt
+src/fmri_utils.egg-info/dependency_links.txt
+src/fmri_utils.egg-info/entry_points.txt
+src/fmri_utils.egg-info/requires.txt
+src/fmri_utils.egg-info/top_level.txt

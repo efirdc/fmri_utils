@@ -60,7 +60,6 @@ def decoding(
             X_test = X_test[:, feature_mask]
             if num_regressors_selected is not None:
                 num_regressors_selected.append(int(np.sum(feature_mask)))
-            # print(f'Filtered out {np.sum(~feature_mask)} voxels, {np.sum(feature_mask)} voxels remaining')
         elif num_regressors_selected is not None:
             # selector was passed but resulted in None (shouldn't happen); keep shape consistent
             num_regressors_selected.append(int(X_train.shape[1]))
@@ -73,7 +72,6 @@ def decoding(
                 np.random.shuffle(y_train_shuffled)
                 model.fit(X_train, y_train_shuffled)
                 y_pred_shuffled = np.asarray(model.predict(X_test))
-                # If y is (N,1), some models may return (N,) predictions; normalize to (N,1)
                 if y.ndim == 2 and y.shape[1] == 1 and y_pred_shuffled.ndim == 1:
                     y_pred_shuffled = y_pred_shuffled[:, None]
                 if normalize_y_pred_fold:
@@ -92,10 +90,10 @@ def decoding(
             models.append(model)
 
     return {
-        'y_pred': y_pred,
-        'models': models,
-        'num_regressors': num_regressors,
-        'num_regressors_selected': num_regressors_selected,
+        "y_pred": y_pred,
+        "models": models,
+        "num_regressors": num_regressors,
+        "num_regressors_selected": num_regressors_selected,
     }
 
 
@@ -112,65 +110,60 @@ def searchlight_decoding(
     # Validate shapes
     num_voxels, num_stimuli = X.shape
     if y.shape[0] != num_stimuli:
-        raise ValueError('y must have length equal to the number of stimuli (second dimension of X)')
+        raise ValueError("y must have length equal to the number of stimuli (second dimension of X)")
     if split_ids.shape[0] != num_stimuli:
-        raise ValueError('run_ids must have length equal to the number of stimuli (second dimension of X)')
+        raise ValueError("run_ids must have length equal to the number of stimuli (second dimension of X)")
     num_windows = len(X_windows)
     if num_windows == 0:
-        warnings.warn('searchlight_decoding called with no windows; returning empty predictions')
+        warnings.warn("searchlight_decoding called with no windows; returning empty predictions")
         return np.empty((0, *y.shape), dtype=float)
     # Warn on empty windows
     empty_windows = sum(1 for w in X_windows if np.asarray(w).size == 0)
     if empty_windows > 0:
-        warnings.warn(f'{empty_windows} of {num_windows} windows are empty; predictions for these entries will be NaN')
+        warnings.warn(f"{empty_windows} of {num_windows} windows are empty; predictions for these entries will be NaN")
 
     # Always disable permutation_test for searchlight output shape consistency
-    kwargs_no_perm = {**kwargs, 'permutation_test': False}
+    kwargs_no_perm = {**kwargs, "permutation_test": False}
 
     # Collect predictions: one row per window, one column per stimulus
     y_pred_all = np.full((num_windows, *y.shape), np.nan, dtype=float)
-    # NOTE: we no longer support returning model attributes here; `decoding` returns a dict including models.
 
     def _process_window(idx: int):
         voxel_indices = np.asarray(X_windows[idx], dtype=int)
         if voxel_indices.size == 0:
-            # Indicate empty; caller will fill NaNs
             return idx, None
         X_sub = X[voxel_indices, :].T
         ret = decoding(X_sub, y, split_ids, **kwargs_no_perm)
         return idx, ret
 
-    tqdm_kwargs = {
-        'mininterval': float(tqdm_mininterval),
-    }
+    tqdm_kwargs = {"mininterval": float(tqdm_mininterval)}
     if tqdm_miniters is not None:
-        tqdm_kwargs['miniters'] = int(tqdm_miniters)
+        tqdm_kwargs["miniters"] = int(tqdm_miniters)
 
     if int(n_jobs) > 1:
         y_pred_rows = [None] * num_windows
         with ThreadPoolExecutor(max_workers=int(n_jobs)) as ex:
             futures = [ex.submit(_process_window, i) for i in range(num_windows)]
-            for fut in tqdm(as_completed(futures), total=len(futures), desc='Searchlight decoding', unit='window', **tqdm_kwargs):
+            for fut in tqdm(as_completed(futures), total=len(futures), desc="Searchlight decoding", unit="window", **tqdm_kwargs):
                 i, ret = fut.result()
                 if ret is None:
                     y_pred_rows[i] = np.full(y.shape, np.nan, dtype=float)
                 else:
-                    y_pred_rows[i] = ret['y_pred']
+                    y_pred_rows[i] = ret["y_pred"]
         for i in range(num_windows):
             y_pred_all[i] = y_pred_rows[i]  # type: ignore[index]
-        return {'y_pred': y_pred_all, 'models': None, 'num_regressors': int(X.shape[0]), 'num_regressors_selected': None}
-    else:
-        for i in tqdm(range(num_windows), total=num_windows, desc='Searchlight decoding', unit='window', **tqdm_kwargs):
-            voxel_indices = np.asarray(X_windows[i], dtype=int)
-            if voxel_indices.size == 0:
-                y_pred_all[i] = np.full(y.shape, np.nan, dtype=float)
-                continue
-            else:
-                X_sub = X[voxel_indices, :].T
-            ret = decoding(X_sub, y, split_ids, **kwargs_no_perm)
-            y_pred_all[i] = ret['y_pred']
+        return {"y_pred": y_pred_all, "models": None, "num_regressors": int(X.shape[0]), "num_regressors_selected": None}
 
-    return {'y_pred': y_pred_all, 'models': None, 'num_regressors': int(X.shape[0]), 'num_regressors_selected': None}
+    for i in tqdm(range(num_windows), total=num_windows, desc="Searchlight decoding", unit="window", **tqdm_kwargs):
+        voxel_indices = np.asarray(X_windows[i], dtype=int)
+        if voxel_indices.size == 0:
+            y_pred_all[i] = np.full(y.shape, np.nan, dtype=float)
+            continue
+        X_sub = X[voxel_indices, :].T
+        ret = decoding(X_sub, y, split_ids, **kwargs_no_perm)
+        y_pred_all[i] = ret["y_pred"]
+
+    return {"y_pred": y_pred_all, "models": None, "num_regressors": int(X.shape[0]), "num_regressors_selected": None}
 
 
 def get_searchlight_windows(
@@ -178,12 +171,10 @@ def get_searchlight_windows(
     radius: int,
     stride: int = 1,
 ):
-    # mask_vol: boolean volume indicating valid voxels (intersection of brain and ROI)
     if radius < 0 or stride <= 0:
-        raise ValueError('radius must be >= 0 and stride must be > 0')
+        raise ValueError("radius must be >= 0 and stride must be > 0")
     mask_vol = mask_vol.astype(bool)
     sx, sy, sz = mask_vol.shape
-    # Map from 3D voxel to flattened X index (masked order)
     idx_vol = np.full(mask_vol.shape, -1, dtype=np.int64)
     idx_vol[mask_vol] = np.arange(int(np.sum(mask_vol)), dtype=np.int64)
 
@@ -200,7 +191,7 @@ def get_searchlight_windows(
                 j1 = min(sy - 1, j + radius)
                 k0 = max(0, k - radius)
                 k1 = min(sz - 1, k + radius)
-                sub = idx_vol[i0:i1 + 1, j0:j1 + 1, k0:k1 + 1]
+                sub = idx_vol[i0 : i1 + 1, j0 : j1 + 1, k0 : k1 + 1]
                 inds = sub[sub >= 0].reshape(-1)
                 if inds.size == 0:
                     continue
@@ -218,17 +209,16 @@ def reconstruct_searchlight_volume(
     fill_value: float = np.nan,
 ) -> nib.Nifti1Image:
     mask_vol = mask_vol.astype(bool)
-    sx, sy, sz = mask_vol.shape
-    # Full grid of voxel centers inside mask
     idxs = np.argwhere(mask_vol)
-    # Interpolate only inside mask
     vals = griddata(
         points=np.asarray(searchlight_centers, dtype=float),
         values=np.asarray(values, dtype=float),
         xi=idxs.astype(float),
-        method='linear',
+        method="linear",
         fill_value=fill_value,
     )
     vol = np.full(mask_vol.shape, fill_value, dtype=np.float32)
     vol[mask_vol] = vals.astype(np.float32)
     return nib.Nifti1Image(vol, affine)
+
+
