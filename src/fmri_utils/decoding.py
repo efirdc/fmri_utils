@@ -122,16 +122,33 @@ def searchlight_decoding(
     if empty_windows > 0:
         warnings.warn(f"{empty_windows} of {num_windows} windows are empty; predictions for these entries will be NaN")
 
-    # Always disable permutation_test for searchlight output shape consistency
+    # Always disable permutation_test for searchlight output shape consistency.
     kwargs_no_perm = {**kwargs, "permutation_test": False}
 
     # Collect predictions: one row per window, one column per stimulus
     y_pred_all = np.full((num_windows, *y.shape), np.nan, dtype=float)
 
+    warned_bad_inds = False
+
     def _process_window(idx: int):
         voxel_indices = np.asarray(X_windows[idx], dtype=int)
         if voxel_indices.size == 0:
             return idx, None
+        # Guard against any invalid indices (can happen if caller's mask and X got out of sync).
+        good = (voxel_indices >= 0) & (voxel_indices < X.shape[0])
+        if not np.all(good):
+            nonlocal warned_bad_inds
+            if not warned_bad_inds:
+                bad_max = int(np.max(voxel_indices[~good])) if np.any(~good) else -1
+                warnings.warn(
+                    f"searchlight_decoding: dropping {int(np.sum(~good))} invalid voxel indices "
+                    f"(max bad index={bad_max}, X.shape[0]={int(X.shape[0])}). "
+                    "Upstream mask/X mismatch should be fixed."
+                )
+                warned_bad_inds = True
+            voxel_indices = voxel_indices[good]
+            if voxel_indices.size == 0:
+                return idx, None
         X_sub = X[voxel_indices, :].T
         ret = decoding(X_sub, y, split_ids, **kwargs_no_perm)
         return idx, ret
@@ -159,6 +176,20 @@ def searchlight_decoding(
         if voxel_indices.size == 0:
             y_pred_all[i] = np.full(y.shape, np.nan, dtype=float)
             continue
+        good = (voxel_indices >= 0) & (voxel_indices < X.shape[0])
+        if not np.all(good):
+            if not warned_bad_inds:
+                bad_max = int(np.max(voxel_indices[~good])) if np.any(~good) else -1
+                warnings.warn(
+                    f"searchlight_decoding: dropping {int(np.sum(~good))} invalid voxel indices "
+                    f"(max bad index={bad_max}, X.shape[0]={int(X.shape[0])}). "
+                    "Upstream mask/X mismatch should be fixed."
+                )
+                warned_bad_inds = True
+            voxel_indices = voxel_indices[good]
+            if voxel_indices.size == 0:
+                y_pred_all[i] = np.full(y.shape, np.nan, dtype=float)
+                continue
         X_sub = X[voxel_indices, :].T
         ret = decoding(X_sub, y, split_ids, **kwargs_no_perm)
         y_pred_all[i] = ret["y_pred"]
@@ -220,5 +251,7 @@ def reconstruct_searchlight_volume(
     vol = np.full(mask_vol.shape, fill_value, dtype=np.float32)
     vol[mask_vol] = vals.astype(np.float32)
     return nib.Nifti1Image(vol, affine)
+
+
 
 

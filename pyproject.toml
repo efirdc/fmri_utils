@@ -14,7 +14,7 @@ dependencies = [
   "pandas",
   "nibabel",
   "nilearn",
-  "matplotlib",
+  "matplotlib>=3.8.0",
   "seaborn",
   "scikit-learn",
   "tqdm",
@@ -22,7 +22,7 @@ dependencies = [
 ]
 
 [project.scripts]
-fmri-second-level = "fmri_utils.second_level_analysis:main"
+fmri-utils = "fmri_utils.second_level_analysis:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

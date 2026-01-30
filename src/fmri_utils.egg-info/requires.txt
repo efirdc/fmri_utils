@@ -3,7 +3,7 @@ scipy
 pandas
 nibabel
 nilearn
-matplotlib
+matplotlib>=3.8.0
 seaborn
 scikit-learn
 tqdm

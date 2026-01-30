@@ -1,2 +1,2 @@
 [console_scripts]
-fmri-second-level = fmri_utils.second_level_analysis:main
+fmri-utils = fmri_utils.second_level_analysis:main

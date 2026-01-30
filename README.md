@@ -18,18 +18,18 @@ cd fmri_utils
 pip install -e .
 ```
 
-## CLI (Fire)
+## Command Line Interface
 
 This package installs a console script:
 
 ```bash
-fmri-second-level second_level --maps_dir=/path/to/mni_subject_maps
+fmri-utils second_level /path/to/mni_subject_maps
 ```
 
 You can also run it in module mode:
 
 ```bash
-python -m fmri_utils.second_level_analysis second_level --maps_dir=/path/to/mni_subject_maps
+python -m fmri_utils.second_level_analysis second_level /path/to/mni_subject_maps
 ```
 
 ### Common flags
@@ -42,8 +42,8 @@ python -m fmri_utils.second_level_analysis second_level --maps_dir=/path/to/mni_
 Example (non-parametric):
 
 ```bash
-fmri-second-level second_level \
-  --maps_dir=/path/to/mni_subject_maps \
+fmri-utils second_level \
+  /path/to/mni_subject_maps \
   --inference=non_parametric \
   --n_perm=5000 \
   --n_jobs=8 \
@@ -69,7 +69,11 @@ print(out.group_dir)
 
 Core inputs:
 - `maps_dir`: Directory containing **only** subject-level NIfTI maps (`.nii`/`.nii.gz`). Output will be written to `maps_dir/group/`.
+- `out_dir`: Optional output directory. Defaults to `maps_dir/group/`.
 - `overwrite`: If `True`, recompute outputs even if they already exist.
+
+Outputs:
+- `args.json`: The CLI/function writes an `args.json` into the output directory containing the relevant parameters used for the run.
 
 Masking / plotting:
 - `mask_image`: Optional mask image. Can be:
