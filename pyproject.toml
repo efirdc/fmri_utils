@@ -8,6 +8,14 @@ version = "0.1.0"
 description = "Reusable fMRI utilities (second-level analysis, fMRIPrep-based transforms, decoding helpers)."
 readme = "README.md"
 requires-python = ">=3.9"
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+]
 dependencies = [
   "numpy",
   "scipy",

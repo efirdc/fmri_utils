@@ -4,6 +4,27 @@ Reusable fMRI utilities (second-level group analysis, fMRIPrep-based transformat
 
 ## Install
 
+### (Optional but recommended) Create and activate a Python environment first
+
+This project requires **Python >= 3.9**. Using an isolated environment helps avoid dependency conflicts.
+
+Using `venv`:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate  # macOS/Linux
+# .venv\Scripts\Activate.ps1  # Windows PowerShell
+python -m pip install --upgrade pip
+```
+
+Or with conda (example):
+
+```bash
+conda create -n fmri-utils python=3.11 -y
+conda activate fmri-utils
+python -m pip install --upgrade pip
+```
+
 ### Option A: install directly from GitHub with pip
 
 ```bash
@@ -37,7 +58,9 @@ python -m fmri_utils.second_level_analysis second_level /path/to/mni_subject_map
 - `--inference=parametric|non_parametric`: parametric (default) or permutation inference (voxelwise FWER)
 - `--n_perm=5000`: permutations for non-parametric mode
 - `--mask_image=mni_template`: use the MNI152 T1 template as a binary mask (`>0`)
+- `--transformation=fisherz`: apply a transformation to each input map in-memory before fitting/testing
 - `--overwrite=True`: regenerate outputs even if files exist
+- `--plot_kwargs="{...}"`: extra keyword args forwarded to `nilearn.plotting.plot_stat_map` for plotting (default `display_mode="mosaic"`)
 
 Example (non-parametric):
 
@@ -72,6 +95,20 @@ Core inputs:
 - `out_dir`: Optional output directory. Defaults to `maps_dir/group/`.
 - `overwrite`: If `True`, recompute outputs even if they already exist.
 
+Optional preprocessing:
+- `transformation`: Optional preprocessing applied **in-memory** to each input map before running inference.
+  Currently supported:
+  - `"fisherz"`: Fisher z-transform (`atanh`), commonly used for correlation (\(r\)) maps prior to group stats.
+  This is commonly used for correlation (\(r\)) maps prior to group statistics.
+
+Plotting:
+- `plot_kwargs`: Optional dict of keyword arguments forwarded to `nilearn.plotting.plot_stat_map` (for the saved mosaics).
+  See Nilearn docs: https://nilearn.github.io/dev/modules/generated/nilearn.plotting.plot_stat_map.html
+
+Example: set explicit cut coordinates per axis (dict `<str: 1D ndarray>` style):
+```bash
+--plot_kwargs="{'display_mode': 'mosaic', 'cut_coords': {'x': (-40, -20, 0, 20, 40), 'y': (-30, -10, 10, 30), 'z': (-20, 0, 20)}}"
+```
 Outputs:
 - `args.json`: The CLI/function writes an `args.json` into the output directory containing the relevant parameters used for the run.
 

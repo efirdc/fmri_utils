@@ -57,6 +57,57 @@ def _iter_nifti_files(maps_dir: Path) -> List[Path]:
     return files
 
 
+def _fisher_z_transform_img(
+    img: nib.Nifti1Image,
+    *,
+    eps: float = 1e-7,
+    clip: bool = True,
+) -> nib.Nifti1Image:
+    """
+    Apply Fisher z-transform (atanh) to an image assumed to contain correlation coefficients.
+
+    Notes
+    -----
+    - For numerical stability, values are optionally clipped to (-1 + eps, 1 - eps).
+    - Non-finite voxels remain non-finite.
+    """
+    data = np.asanyarray(img.dataobj, dtype=np.float64)
+    out = np.full(data.shape, np.nan, dtype=np.float64)
+
+    finite = np.isfinite(data)
+    if not np.any(finite):
+        return image.new_img_like(img, out, copy_header=True)
+
+    x = data[finite]
+    if bool(clip):
+        x = np.clip(x, -1.0 + float(eps), 1.0 - float(eps))
+    else:
+        bad = (x <= -1.0) | (x >= 1.0)
+        if np.any(bad):
+            raise ValueError(
+                "Fisher z-transform requires all finite values to be strictly within (-1, 1). "
+                "Either clean your maps or set clip=True."
+            )
+
+    out[finite] = np.arctanh(x)
+    return image.new_img_like(img, out, copy_header=True)
+
+
+def _apply_transformation_img(
+    img: nib.Nifti1Image,
+    *,
+    transformation: Optional[str],
+) -> nib.Nifti1Image:
+    if transformation is None:
+        return img
+    t = str(transformation).lower().strip()
+    if t in ("", "none", "null"):
+        return img
+    if t in ("fisherz", "fisher_z", "fisher-z"):
+        return _fisher_z_transform_img(img)
+    raise ValueError(f"Unsupported transformation: {transformation!r}. Supported: None, 'fisherz'.")
+
+
 def _as_binary_mask(mask_img: nib.Nifti1Image) -> nib.Nifti1Image:
     """
     Ensure a mask is binary (0/1) by thresholding > 0.
@@ -142,6 +193,8 @@ def second_level_one_sample_ttest(
     template_image: Optional[Union[str, Path, nib.Nifti1Image]] = None,
     mask_image: Optional[Union[str, Path, nib.Nifti1Image]] = None,
     use_mask_in_thresholding: bool = True,
+    transformation: Optional[str] = None,
+    plot_kwargs: Optional[dict] = None,
     min_between_subject_std: Optional[float] = None,
     min_subjects_per_voxel: Optional[int] = None,
     inference: str = "parametric",
@@ -205,6 +258,8 @@ def second_level_one_sample_ttest(
                 else (str(mask_image) if isinstance(mask_image, (str, Path)) else ("in_memory" if mask_image is not None else None))
             ),
             "use_mask_in_thresholding": bool(use_mask_in_thresholding),
+            "transformation": transformation,
+            "plot_kwargs": plot_kwargs,
             "min_between_subject_std": (
                 float(min_between_subject_std) if min_between_subject_std is not None else None
             ),
@@ -282,14 +337,27 @@ def second_level_one_sample_ttest(
         validity_mask_img = image.new_img_like(first_img, valid.astype(np.uint8), copy_header=True)
         resolved_mask_img = validity_mask_img
 
+    transformation_tag = ""
+    if transformation is not None:
+        t = str(transformation).lower().strip()
+        if t not in ("", "none", "null"):
+            transformation_tag = f"_{t}"
+
+    second_level_input = [str(p) for p in map_paths]
+    if transformation_tag != "":
+        imgs = [image.load_img(str(p)) for p in map_paths]
+        second_level_input = [
+            _apply_transformation_img(img, transformation=transformation) for img in imgs
+        ]
+
     # Group-level GLM (one-sample t-test)
     design_matrix = pd.DataFrame({"intercept": np.ones(len(map_paths))})
-    t_unc_path = group_dir / "tmap_unc.nii.gz"
+    t_unc_path = group_dir / f"tmap_unc{transformation_tag}.nii.gz"
     if t_unc_path.exists() and not overwrite:
         t_scores_img = image.load_img(str(t_unc_path))
     else:
         slm = SecondLevelModel(smoothing_fwhm=smoothing_fwhm, mask_img=resolved_mask_img)
-        slm = slm.fit([str(p) for p in map_paths], design_matrix=design_matrix)
+        slm = slm.fit(second_level_input, design_matrix=design_matrix)
         t_scores_img = slm.compute_contrast("intercept", output_type="stat")
         t_scores_img.to_filename(str(t_unc_path))
 
@@ -359,14 +427,14 @@ def second_level_one_sample_ttest(
         gt_mask_img.to_filename(str(masks_dir / "tail_mask_gt_tpos.nii.gz"))
         lt_mask_img.to_filename(str(masks_dir / "tail_mask_lt_tneg.nii.gz"))
 
-        thresholded_two_sided_path = group_dir / f"tmap_{height_control}_alpha{alpha_tag}_k{int(cluster_threshold)}.nii.gz"
+        thresholded_two_sided_path = group_dir / f"tmap_{height_control}_alpha{alpha_tag}_k{int(cluster_threshold)}{transformation_tag}.nii.gz"
         thresholded_two_sided_map = _threshold_and_cache(
             t_scores_img,
             out_path=thresholded_two_sided_path,
             two_sided=True,
             mask_img=(resolved_mask_img if bool(use_mask_in_thresholding) else None),
         )
-        thresholded_gt_path = group_dir / f"tmap_{height_control}_alpha{alpha_tag}_k{int(cluster_threshold)}_gt_onesided.nii.gz"
+        thresholded_gt_path = group_dir / f"tmap_{height_control}_alpha{alpha_tag}_k{int(cluster_threshold)}{transformation_tag}_gt_onesided.nii.gz"
         thresholded_gt_map = _threshold_and_cache(
             # One-sided correction is performed over the same analysis mask as the two-sided test.
             # (Directional inference changes the tail, not the voxel inclusion set.)
@@ -376,21 +444,21 @@ def second_level_one_sample_ttest(
             mask_img=(resolved_mask_img if bool(use_mask_in_thresholding) else None),
         )
         t_flipped = image.math_img("-img", img=t_scores_img)
-        thresholded_lt_path = group_dir / f"tmap_{height_control}_alpha{alpha_tag}_k{int(cluster_threshold)}_lt_onesided.nii.gz"
+        thresholded_lt_path = group_dir / f"tmap_{height_control}_alpha{alpha_tag}_k{int(cluster_threshold)}{transformation_tag}_lt_onesided.nii.gz"
         thresholded_lt_map = _threshold_and_cache(
             t_flipped,
             out_path=thresholded_lt_path,
             two_sided=False,
             mask_img=(resolved_mask_img if bool(use_mask_in_thresholding) else None),
         )
-        base_stem = f"tmap_{height_control}_alpha{alpha_tag}_k{int(cluster_threshold)}"
+        base_stem = f"tmap_{height_control}_alpha{alpha_tag}_k{int(cluster_threshold)}{transformation_tag}"
         base_title = f"t-map ({height_control}, alpha={alpha}, k>={int(cluster_threshold)})"
         gt_title = f"t-map > 0 (one-sided, {height_control}, alpha={alpha}, k>={int(cluster_threshold)})"
         lt_title = f"t-map < 0 (one-sided, {height_control}, alpha={alpha}, k>={int(cluster_threshold)})"
     else:
         def _np_logp(two_sided_test: bool, second_level_contrast):
             return non_parametric_inference(
-                second_level_input=[str(p) for p in map_paths],
+                second_level_input=second_level_input,
                 design_matrix=design_matrix,
                 second_level_contrast=second_level_contrast,
                 mask=resolved_mask_img,
@@ -461,7 +529,7 @@ def second_level_one_sample_ttest(
         thresholded_gt_map = image.new_img_like(
             t_gt_img, np.where(gt_mask & (t_gt_data > 0), t_gt_data, 0.0), copy_header=True
         )
-        thresholded_gt_path = group_dir / f"tmap_vfwe_alpha{alpha_tag}{tfce_tag}{cfp_tag}_gt_onesided.nii.gz"
+        thresholded_gt_path = group_dir / f"tmap_vfwe_alpha{alpha_tag}{tfce_tag}{cfp_tag}{transformation_tag}_gt_onesided.nii.gz"
         thresholded_gt_map.to_filename(str(thresholded_gt_path))
 
         # Two-sided
@@ -479,7 +547,7 @@ def second_level_one_sample_ttest(
         thresholded_two_sided_map = image.new_img_like(
             t_two_img, np.where(two_mask, t_two_data, 0.0), copy_header=True
         )
-        thresholded_two_sided_path = group_dir / f"tmap_vfwe_alpha{alpha_tag}{tfce_tag}{cfp_tag}.nii.gz"
+        thresholded_two_sided_path = group_dir / f"tmap_vfwe_alpha{alpha_tag}{tfce_tag}{cfp_tag}{transformation_tag}.nii.gz"
         thresholded_two_sided_map.to_filename(str(thresholded_two_sided_path))
 
         
@@ -498,10 +566,10 @@ def second_level_one_sample_ttest(
         thresholded_lt_map = image.new_img_like(
             t_lt_img, np.where(lt_mask & (t_lt_data < 0), -t_lt_data, 0.0), copy_header=True
         )
-        thresholded_lt_path = group_dir / f"tmap_vfwe_alpha{alpha_tag}{tfce_tag}{cfp_tag}_lt_onesided.nii.gz"
+        thresholded_lt_path = group_dir / f"tmap_vfwe_alpha{alpha_tag}{tfce_tag}{cfp_tag}{transformation_tag}_lt_onesided.nii.gz"
         thresholded_lt_map.to_filename(str(thresholded_lt_path))
 
-        base_stem = f"tmap_vfwe_alpha{alpha_tag}{tfce_tag}{cfp_tag}"
+        base_stem = f"tmap_vfwe_alpha{alpha_tag}{tfce_tag}{cfp_tag}{transformation_tag}"
         base_title = f"t-map (vfwe, alpha={alpha})"
         gt_title = f"t-map > 0 (one-sided, vfwe, alpha={alpha})"
         lt_title = f"t-map < 0 (one-sided, vfwe, alpha={alpha})"
@@ -524,15 +592,30 @@ def second_level_one_sample_ttest(
             bg_img = template_image
             template_image_path = None
 
+    plot_kwargs_base = dict(plot_kwargs or {})
+    if "output_file" in plot_kwargs_base:
+        raise ValueError(
+            "plot_kwargs must not include 'output_file'. "
+            "This function manages output filenames itself (it always saves mosaics into the group_dir)."
+        )
+    if "bg_img" in plot_kwargs_base:
+        raise ValueError(
+            "plot_kwargs must not include 'bg_img'. "
+            "Use template_image=... (or leave it as default) to control the background image."
+        )
+
     def _render_mosaic(stat_img, *, file_stem: str, title: str) -> Path:
+        plot_kwargs_local = dict(plot_kwargs_base)
+        plot_kwargs_local.setdefault("display_mode", "mosaic")
+        plot_kwargs_local.setdefault("colorbar", True)
+        plot_kwargs_local.setdefault("cmap", cmap)
+        plot_kwargs_local.setdefault("title", title)
+
         mosaic = group_dir / f"{file_stem}_mosaic.png"
         display = plotting.plot_stat_map(
             stat_img,
             bg_img=bg_img,
-            display_mode="mosaic",
-            colorbar=True,
-            cmap=cmap,
-            title=title,
+            **plot_kwargs_local,
         )
         display.savefig(str(mosaic))
         display.close()
