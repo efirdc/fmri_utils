@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import Dict, List, Optional, Sequence, Union
 import json
 import warnings
 import inspect
@@ -186,7 +186,7 @@ def _jsonable(val):
 
 
 def second_level_one_sample_ttest(
-    maps_dir: Union[str, Path],
+    maps: Union[str, Path, pd.DataFrame, Sequence[Union[str, Path]], np.ndarray],
     *,
     out_dir: Optional[Union[str, Path]] = None,
     smoothing_fwhm: Optional[float] = None,
@@ -210,40 +210,92 @@ def second_level_one_sample_ttest(
     cmap: str = "RdBu_r",
     overwrite: bool = False,
     **threshold_kwargs,
-) -> SecondLevelOutputs:
+) -> Dict[str, SecondLevelOutputs]:
     """
-    Second-level group t-test (one-sample) from a directory of subject-level maps.
+    Second-level group GLM (one-sample) from subject-level maps with optional covariates.
 
     Assumptions
     -----------
-    - `maps_dir` contains ONLY the subject-level NIfTI maps you want to enter into the group model.
-      (Non-recursive; subfolders are ignored.)
-    - Output is written to a `group/` subfolder inside `maps_dir`.
+    Inputs (`maps`)
+    --------------
+    `maps` can be any of:
+    - **Directory path**: contains ONLY the subject-level NIfTI maps to enter into the group model
+      (non-recursive; subfolders ignored).
+    - **List/array of paths**: explicit subject-level map paths.
+    - **CSV/TSV path**: loaded into a dataframe; must contain a `path` (or `map_path`) column plus optional covariate columns.
+    - **DataFrame**: must contain a `path` (or `map_path`) column plus optional covariate columns.
+
+    Output
+    ------
+    Outputs are written to `out_dir` (or to a default `group/` folder when `maps` is a directory path).
+    If covariates are provided, the function produces one set of outputs per regressor (including `intercept`),
+    written into subfolders:
+        `{out_dir}/{regressor_name}/...`
     - Produces:
       - Two-sided thresholded map
       - One-sided gt map (positive tail)
       - One-sided lt map computed by sign-flipping the stat image (so lt map has positive t-values)
     """
-    maps_dir = Path(maps_dir)
-    if not maps_dir.exists():
-        raise FileNotFoundError(f"maps_dir does not exist: {maps_dir}")
-    if not maps_dir.is_dir():
-        raise NotADirectoryError(f"maps_dir is not a directory: {maps_dir}")
+    def _coerce_maps_to_df(
+        spec: Union[str, Path, pd.DataFrame, Sequence[Union[str, Path]], np.ndarray],
+    ) -> tuple[Optional[Path], pd.DataFrame]:
+        """
+        Returns (maps_dir_if_applicable, df with at least a 'path' column).
+        """
+        if isinstance(spec, pd.DataFrame):
+            df0 = spec.copy()
+            maps_dir0: Optional[Path] = None
+        else:
+            p = Path(spec) if isinstance(spec, (str, Path)) else None
+            if p is not None and p.exists() and p.is_dir():
+                maps_dir0 = p
+                df0 = pd.DataFrame({"path": [str(pp) for pp in _iter_nifti_files(p)]})
+            elif p is not None and p.exists() and p.is_file() and p.suffix.lower() in (".csv", ".tsv"):
+                maps_dir0 = None
+                df0 = pd.read_csv(p, sep=None, engine="python")
+            else:
+                maps_dir0 = None
+                if isinstance(spec, (str, Path)):
+                    df0 = pd.DataFrame({"path": [str(Path(spec))]})
+                else:
+                    arr = np.asarray(spec, dtype=object)
+                    if arr.ndim != 1:
+                        raise ValueError(f"`maps` must be 1D when array-like; got shape={arr.shape}")
+                    df0 = pd.DataFrame({"path": [str(Path(x)) for x in arr.tolist()]})
 
-    group_dir = Path(out_dir) if out_dir is not None else (maps_dir / "group")
+        if "path" not in df0.columns:
+            if "map_path" in df0.columns:
+                df0 = df0.rename(columns={"map_path": "path"})
+            else:
+                raise ValueError("`maps` dataframe/CSV must include a 'path' (or 'map_path') column.")
+
+        df0["path"] = df0["path"].astype(str)
+        return maps_dir0, df0
+
+    maps_dir, maps_df = _coerce_maps_to_df(maps)
+
+    group_dir = (
+        Path(out_dir)
+        if out_dir is not None
+        else ((maps_dir / "group") if maps_dir is not None else (Path.cwd() / "group"))
+    )
     group_dir.mkdir(parents=True, exist_ok=True)
 
-    map_paths = _iter_nifti_files(maps_dir)
+    map_paths = [Path(p) for p in maps_df["path"].tolist()]
     if len(map_paths) == 0:
-        raise ValueError(f"No subject NIfTI maps found in {maps_dir}")
+        raise ValueError("No subject NIfTI maps provided.")
     if len(map_paths) < 2:
-        raise ValueError(f"Need at least 2 maps for a group t-test; found {len(map_paths)} in {maps_dir}")
+        raise ValueError(f"Need at least 2 maps for a group model; got {len(map_paths)}.")
+
+    missing = [str(p) for p in map_paths if not p.exists()]
+    if missing:
+        raise FileNotFoundError(f"Some map paths do not exist (showing up to 5): {missing[:5]}")
 
     # Save run arguments for reproducibility
     args_path = group_dir / "args.json"
     if overwrite or not args_path.exists():
         args_to_save = {
-            "maps_dir": maps_dir,
+            "maps": (str(maps_dir) if maps_dir is not None else "dataframe_or_list"),
             "out_dir": group_dir,
             "inference": inference,
             "smoothing_fwhm": smoothing_fwhm,
@@ -276,6 +328,8 @@ def second_level_one_sample_ttest(
             "cmap": cmap,
             "overwrite": bool(overwrite),
             "threshold_kwargs": threshold_kwargs,
+            "n_maps": int(len(map_paths)),
+            "covariates": [c for c in maps_df.columns if c != "path"],
         }
         with open(args_path, "w", encoding="utf-8") as f:
             json.dump({k: _jsonable(v) for k, v in args_to_save.items()}, f, indent=2)
@@ -350,17 +404,6 @@ def second_level_one_sample_ttest(
             _apply_transformation_img(img, transformation=transformation) for img in imgs
         ]
 
-    # Group-level GLM (one-sample t-test)
-    design_matrix = pd.DataFrame({"intercept": np.ones(len(map_paths))})
-    t_unc_path = group_dir / f"tmap_unc{transformation_tag}.nii.gz"
-    if t_unc_path.exists() and not overwrite:
-        t_scores_img = image.load_img(str(t_unc_path))
-    else:
-        slm = SecondLevelModel(smoothing_fwhm=smoothing_fwhm, mask_img=resolved_mask_img)
-        slm = slm.fit(second_level_input, design_matrix=design_matrix)
-        t_scores_img = slm.compute_contrast("intercept", output_type="stat")
-        t_scores_img.to_filename(str(t_unc_path))
-
     inference = str(inference).lower().strip()
     if inference not in ("parametric", "non_parametric"):
         raise ValueError("inference must be 'parametric' or 'non_parametric'")
@@ -381,6 +424,52 @@ def second_level_one_sample_ttest(
     ):
         if out_path.exists() and not overwrite:
             return image.load_img(str(out_path))
+
+        # Guard: nilearn thresholding can crash when the provided mask is empty (0 voxels),
+        # or when the stat image has no finite voxels under the mask (e.g. all-NaN / empty
+        # intersection after resampling). In those cases, the correct output is an "empty"
+        # thresholded map.
+        if mask_img is not None:
+            mask_data = np.asanyarray(mask_img.dataobj)
+            if mask_data.size == 0 or int(np.count_nonzero(mask_data)) == 0:
+                empty = image.new_img_like(stat_img, np.zeros(stat_img.shape, dtype=np.float32))
+                empty.to_filename(str(out_path))
+                return empty
+            stat_data = np.asanyarray(stat_img.dataobj)
+            masked = stat_data[mask_data.astype(bool)]
+        else:
+            stat_data = np.asanyarray(stat_img.dataobj)
+            masked = stat_data.reshape(-1)
+
+        finite = masked[np.isfinite(masked)]
+        if finite.size == 0:
+            empty = image.new_img_like(stat_img, np.zeros(stat_img.shape, dtype=np.float32))
+            empty.to_filename(str(out_path))
+            return empty
+        # If all finite values are exactly zero, thresholding is meaningless and may produce inf thresholds.
+        if float(np.max(np.abs(finite))) == 0.0:
+            empty = image.new_img_like(stat_img, np.zeros(stat_img.shape, dtype=np.float32))
+            empty.to_filename(str(out_path))
+            return empty
+
+        # Fire forwards unknown CLI args into **threshold_kwargs, so validate against nilearn's
+        # threshold_stats_img signature to provide a clear error instead of a confusing TypeError.
+        allowed = set(sig.parameters.keys())
+        unknown = sorted([k for k in threshold_kwargs.keys() if k not in allowed])
+        if unknown:
+            if "transformation" in unknown:
+                raise ValueError(
+                    "Got an unexpected argument 'transformation' forwarded into nilearn.threshold_stats_img(). "
+                    "This usually means you're running an older installed version of fmri-utils that does not "
+                    "support the --transformation CLI flag, so Fire treated it as an extra kwarg. "
+                    "Upgrade fmri-utils and try again (e.g. `pip install --upgrade \"git+https://github.com/efirdc/fmri_utils.git\"`)."
+                )
+            raise ValueError(
+                "Unsupported thresholding kwargs passed via **threshold_kwargs: "
+                f"{unknown}. These kwargs are forwarded to nilearn.glm.threshold_stats_img; "
+                f"allowed keys for your nilearn version are: {sorted(allowed)}."
+            )
+
         kwargs_local = {
             "alpha": alpha,
             "height_control": height_control,
@@ -400,181 +489,27 @@ def second_level_one_sample_ttest(
         thr_img.to_filename(str(out_path))
         return thr_img
 
-    # Thresholding outputs
-    if inference == "parametric":
-        alpha_tag = str(alpha).replace(".", "p")
-        # --- Save masks used for analysis / QC ---
-        masks_dir = group_dir / "masks"
-        masks_dir.mkdir(parents=True, exist_ok=True)
-        if resolved_mask_img is not None:
-            resolved_mask_img.to_filename(str(masks_dir / "analysis_mask_resolved.nii.gz"))
-        if validity_mask_img is not None:
-            validity_mask_img.to_filename(str(masks_dir / "analysis_mask_validity_std.nii.gz"))
-
-        t_data = np.asarray(t_scores_img.dataobj, dtype=float)
-        finite = np.isfinite(t_data)
-        gt_mask_arr = finite & (t_data > 0)
-        lt_mask_arr = finite & (t_data < 0)
-        if resolved_mask_img is not None:
-            m = np.asarray(resolved_mask_img.dataobj).astype(bool)
-            if m.shape == t_data.shape:
-                gt_mask_arr &= m
-                lt_mask_arr &= m
-        # These tail masks are for QC/inspection only. We do NOT use them for inference correction,
-        # because selecting voxels based on the sign of the observed t-statistic is data-driven.
-        gt_mask_img = image.new_img_like(t_scores_img, gt_mask_arr.astype(np.uint8), copy_header=True)
-        lt_mask_img = image.new_img_like(t_scores_img, lt_mask_arr.astype(np.uint8), copy_header=True)
-        gt_mask_img.to_filename(str(masks_dir / "tail_mask_gt_tpos.nii.gz"))
-        lt_mask_img.to_filename(str(masks_dir / "tail_mask_lt_tneg.nii.gz"))
-
-        thresholded_two_sided_path = group_dir / f"tmap_{height_control}_alpha{alpha_tag}_k{int(cluster_threshold)}{transformation_tag}.nii.gz"
-        thresholded_two_sided_map = _threshold_and_cache(
-            t_scores_img,
-            out_path=thresholded_two_sided_path,
-            two_sided=True,
-            mask_img=(resolved_mask_img if bool(use_mask_in_thresholding) else None),
+    # ---- Design matrix (intercept + optional covariates) ----
+    covariate_cols = [c for c in maps_df.columns if c != "path"]
+    if covariate_cols:
+        cov_df = maps_df[covariate_cols].copy()
+        for c in covariate_cols:
+            cov_df[c] = pd.to_numeric(cov_df[c], errors="coerce")
+        if cov_df.isna().any().any():
+            bad = {c: int(cov_df[c].isna().sum()) for c in covariate_cols if cov_df[c].isna().any()}
+            raise ValueError(f"Covariate columns must be numeric; found NaNs after parsing: {bad}")
+        design_matrix = pd.concat(
+            [pd.DataFrame({"intercept": np.ones(len(map_paths))}), cov_df.reset_index(drop=True)],
+            axis=1,
         )
-        thresholded_gt_path = group_dir / f"tmap_{height_control}_alpha{alpha_tag}_k{int(cluster_threshold)}{transformation_tag}_gt_onesided.nii.gz"
-        thresholded_gt_map = _threshold_and_cache(
-            # One-sided correction is performed over the same analysis mask as the two-sided test.
-            # (Directional inference changes the tail, not the voxel inclusion set.)
-            t_scores_img,
-            out_path=thresholded_gt_path,
-            two_sided=False,
-            mask_img=(resolved_mask_img if bool(use_mask_in_thresholding) else None),
-        )
-        t_flipped = image.math_img("-img", img=t_scores_img)
-        thresholded_lt_path = group_dir / f"tmap_{height_control}_alpha{alpha_tag}_k{int(cluster_threshold)}{transformation_tag}_lt_onesided.nii.gz"
-        thresholded_lt_map = _threshold_and_cache(
-            t_flipped,
-            out_path=thresholded_lt_path,
-            two_sided=False,
-            mask_img=(resolved_mask_img if bool(use_mask_in_thresholding) else None),
-        )
-        base_stem = f"tmap_{height_control}_alpha{alpha_tag}_k{int(cluster_threshold)}{transformation_tag}"
-        base_title = f"t-map ({height_control}, alpha={alpha}, k>={int(cluster_threshold)})"
-        gt_title = f"t-map > 0 (one-sided, {height_control}, alpha={alpha}, k>={int(cluster_threshold)})"
-        lt_title = f"t-map < 0 (one-sided, {height_control}, alpha={alpha}, k>={int(cluster_threshold)})"
     else:
-        def _np_logp(two_sided_test: bool, second_level_contrast):
-            return non_parametric_inference(
-                second_level_input=second_level_input,
-                design_matrix=design_matrix,
-                second_level_contrast=second_level_contrast,
-                mask=resolved_mask_img,
-                smoothing_fwhm=smoothing_fwhm,
-                model_intercept=False,
-                n_perm=int(n_perm),
-                two_sided_test=bool(two_sided_test),
-                random_state=random_state,
-                n_jobs=int(n_jobs),
-                verbose=int(verbose),
-                threshold=cluster_forming_p_threshold,
-                tfce=bool(tfce),
-            )
+        design_matrix = pd.DataFrame({"intercept": np.ones(len(map_paths))})
 
-        def _extract_t(ret):
-            if isinstance(ret, dict):
-                if "t" in ret:
-                    return ret["t"]
-                return None
-            return None
+    # Fit a parametric GLM once for (a) parametric inference and (b) QC t-maps in non-parametric mode.
+    slm = SecondLevelModel(smoothing_fwhm=smoothing_fwhm, mask_img=resolved_mask_img)
+    slm = slm.fit(second_level_input, design_matrix=design_matrix)
 
-        def _select_logp(ret):
-            """
-            Pick the appropriate corrected logp image depending on the inference mode:
-            - TFCE: use logp_max_tfce when available
-            - Cluster-size inference (threshold not None): use logp_max_size when available
-            - Otherwise: default to max-T FWER logp_max_t
-            """
-            if not isinstance(ret, dict):
-                return ret
-            if bool(tfce) and "logp_max_tfce" in ret:
-                return ret["logp_max_tfce"]
-            if cluster_forming_p_threshold is not None and "logp_max_size" in ret:
-                return ret["logp_max_size"]
-            if "logp_max_t" in ret:
-                return ret["logp_max_t"]
-            keys = sorted(ret.keys())
-            raise ValueError(
-                "Unsupported non_parametric_inference outputs; expected one of "
-                "logp_max_t / logp_max_size / logp_max_tfce. "
-                f"Got keys: {keys}"
-            )
-
-        logp_thr = float(-np.log10(alpha))
-        alpha_tag = str(alpha).replace(".", "p")
-        tfce_tag = "_tfce" if bool(tfce) else ""
-        if cluster_forming_p_threshold is None:
-            cfp_tag = ""
-        else:
-            cfp_tag = f"_cfp{str(cluster_forming_p_threshold).replace('.', 'p')}"
-
-        # Save raw non-parametric outputs for QC (even if thresholded maps end up empty).
-        raw_dir = group_dir / "nonparametric_raw"
-        raw_dir.mkdir(parents=True, exist_ok=True)
-
-        # gt (one-sided)
-        logp_gt_ret = _np_logp(False, [1.0])
-        logp_gt_img = _select_logp(logp_gt_ret)
-        t_gt_img = _extract_t(logp_gt_ret) or t_scores_img
-        try:
-            logp_gt_img.to_filename(str(raw_dir / f"logp_vfwe_alpha{alpha_tag}{tfce_tag}{cfp_tag}_gt.nii.gz"))
-        except Exception:
-            pass
-        if t_gt_img is None:
-            t_gt_img = t_scores_img
-        gt_mask = np.asarray(logp_gt_img.dataobj) >= logp_thr
-        t_gt_data = np.asarray(t_gt_img.dataobj)
-        thresholded_gt_map = image.new_img_like(
-            t_gt_img, np.where(gt_mask & (t_gt_data > 0), t_gt_data, 0.0), copy_header=True
-        )
-        thresholded_gt_path = group_dir / f"tmap_vfwe_alpha{alpha_tag}{tfce_tag}{cfp_tag}{transformation_tag}_gt_onesided.nii.gz"
-        thresholded_gt_map.to_filename(str(thresholded_gt_path))
-
-        # Two-sided
-        logp_two_ret = _np_logp(True, [1.0])
-        logp_two_img = _select_logp(logp_two_ret)
-        t_two_img = _extract_t(logp_two_ret) or t_scores_img
-        try:
-            logp_two_img.to_filename(str(raw_dir / f"logp_vfwe_alpha{alpha_tag}{tfce_tag}{cfp_tag}_two_sided.nii.gz"))
-        except Exception:
-            pass
-        if t_two_img is None:
-            t_two_img = t_scores_img
-        two_mask = np.asarray(logp_two_img.dataobj) >= logp_thr
-        t_two_data = np.asarray(t_two_img.dataobj)
-        thresholded_two_sided_map = image.new_img_like(
-            t_two_img, np.where(two_mask, t_two_data, 0.0), copy_header=True
-        )
-        thresholded_two_sided_path = group_dir / f"tmap_vfwe_alpha{alpha_tag}{tfce_tag}{cfp_tag}{transformation_tag}.nii.gz"
-        thresholded_two_sided_map.to_filename(str(thresholded_two_sided_path))
-
-        
-        # lt (one-sided on negative), output positive values
-        logp_lt_ret = _np_logp(False, [-1.0])
-        logp_lt_img = _select_logp(logp_lt_ret)
-        t_lt_img = _extract_t(logp_lt_ret) or t_scores_img
-        try:
-            logp_lt_img.to_filename(str(raw_dir / f"logp_vfwe_alpha{alpha_tag}{tfce_tag}{cfp_tag}_lt.nii.gz"))
-        except Exception:
-            pass
-        if t_lt_img is None:
-            t_lt_img = t_scores_img
-        lt_mask = np.asarray(logp_lt_img.dataobj) >= logp_thr
-        t_lt_data = np.asarray(t_lt_img.dataobj)
-        thresholded_lt_map = image.new_img_like(
-            t_lt_img, np.where(lt_mask & (t_lt_data < 0), -t_lt_data, 0.0), copy_header=True
-        )
-        thresholded_lt_path = group_dir / f"tmap_vfwe_alpha{alpha_tag}{tfce_tag}{cfp_tag}{transformation_tag}_lt_onesided.nii.gz"
-        thresholded_lt_map.to_filename(str(thresholded_lt_path))
-
-        base_stem = f"tmap_vfwe_alpha{alpha_tag}{tfce_tag}{cfp_tag}{transformation_tag}"
-        base_title = f"t-map (vfwe, alpha={alpha})"
-        gt_title = f"t-map > 0 (one-sided, vfwe, alpha={alpha})"
-        lt_title = f"t-map < 0 (one-sided, vfwe, alpha={alpha})"
-
-    # Template image for plotting (and convenience output)
+    # Plot background template (shared across contrasts)
     template_image_path: Optional[Path] = None
     if template_image is None:
         bg_img = load_mni152_template()
@@ -604,14 +539,14 @@ def second_level_one_sample_ttest(
             "Use template_image=... (or leave it as default) to control the background image."
         )
 
-    def _render_mosaic(stat_img, *, file_stem: str, title: str) -> Path:
+    def _render_mosaic(stat_img, *, out_dir_local: Path, file_stem: str, title: str) -> Path:
         plot_kwargs_local = dict(plot_kwargs_base)
         plot_kwargs_local.setdefault("display_mode", "mosaic")
         plot_kwargs_local.setdefault("colorbar", True)
         plot_kwargs_local.setdefault("cmap", cmap)
         plot_kwargs_local.setdefault("title", title)
 
-        mosaic = group_dir / f"{file_stem}_mosaic.png"
+        mosaic = out_dir_local / f"{file_stem}_mosaic.png"
         display = plotting.plot_stat_map(
             stat_img,
             bg_img=bg_img,
@@ -621,27 +556,191 @@ def second_level_one_sample_ttest(
         display.close()
         return mosaic
 
-    mosaic_two_sided_png = _render_mosaic(thresholded_two_sided_map, file_stem=base_stem, title=base_title)
-    mosaic_gt_png = _render_mosaic(
-        thresholded_gt_map, file_stem=f"{base_stem}_gt_onesided", title=gt_title
-    )
-    mosaic_lt_png = _render_mosaic(
-        thresholded_lt_map, file_stem=f"{base_stem}_lt_onesided", title=lt_title
-    )
+    regressor_names = list(design_matrix.columns)
+    outputs: Dict[str, SecondLevelOutputs] = {}
 
-    return SecondLevelOutputs(
-        maps_dir=maps_dir,
-        group_dir=group_dir,
-        template_image_path=template_image_path,
-        t_unc_path=t_unc_path,
-        thresholded_two_sided_path=thresholded_two_sided_path,
-        mosaic_two_sided_png=mosaic_two_sided_png,
-        thresholded_gt_path=thresholded_gt_path,
-        thresholded_lt_path=thresholded_lt_path,
-        mosaic_gt_png=mosaic_gt_png,
-        mosaic_lt_png=mosaic_lt_png,
-        used_map_paths=map_paths,
-    )
+    for reg_name in regressor_names:
+        reg_dir = group_dir / str(reg_name)
+        reg_dir.mkdir(parents=True, exist_ok=True)
+
+        # --- Save masks used for analysis / QC ---
+        masks_dir = reg_dir / "masks"
+        masks_dir.mkdir(parents=True, exist_ok=True)
+        if resolved_mask_img is not None:
+            resolved_mask_img.to_filename(str(masks_dir / "analysis_mask_resolved.nii.gz"))
+        if validity_mask_img is not None:
+            validity_mask_img.to_filename(str(masks_dir / "analysis_mask_validity_std.nii.gz"))
+
+        # Unthresholded t-map
+        t_unc_path = reg_dir / f"tmap_unc{transformation_tag}.nii.gz"
+        if t_unc_path.exists() and not overwrite:
+            t_scores_img = image.load_img(str(t_unc_path))
+        else:
+            t_scores_img = slm.compute_contrast(reg_name, output_type="stat")
+            t_scores_img.to_filename(str(t_unc_path))
+
+        if inference == "parametric":
+            alpha_tag = str(alpha).replace(".", "p")
+
+            thresholded_two_sided_path = reg_dir / f"tmap_{height_control}_alpha{alpha_tag}_k{int(cluster_threshold)}{transformation_tag}.nii.gz"
+            thresholded_two_sided_map = _threshold_and_cache(
+                t_scores_img,
+                out_path=thresholded_two_sided_path,
+                two_sided=True,
+                mask_img=(resolved_mask_img if bool(use_mask_in_thresholding) else None),
+            )
+            thresholded_gt_path = reg_dir / f"tmap_{height_control}_alpha{alpha_tag}_k{int(cluster_threshold)}{transformation_tag}_gt_onesided.nii.gz"
+            thresholded_gt_map = _threshold_and_cache(
+                t_scores_img,
+                out_path=thresholded_gt_path,
+                two_sided=False,
+                mask_img=(resolved_mask_img if bool(use_mask_in_thresholding) else None),
+            )
+            t_flipped = image.math_img("-img", img=t_scores_img)
+            thresholded_lt_path = reg_dir / f"tmap_{height_control}_alpha{alpha_tag}_k{int(cluster_threshold)}{transformation_tag}_lt_onesided.nii.gz"
+            thresholded_lt_map = _threshold_and_cache(
+                t_flipped,
+                out_path=thresholded_lt_path,
+                two_sided=False,
+                mask_img=(resolved_mask_img if bool(use_mask_in_thresholding) else None),
+            )
+
+            base_stem = f"tmap_{height_control}_alpha{alpha_tag}_k{int(cluster_threshold)}{transformation_tag}"
+            base_title = f"{reg_name}: t-map ({height_control}, alpha={alpha}, k>={int(cluster_threshold)})"
+            gt_title = f"{reg_name}: t-map > 0 (one-sided, {height_control}, alpha={alpha}, k>={int(cluster_threshold)})"
+            lt_title = f"{reg_name}: t-map < 0 (one-sided, {height_control}, alpha={alpha}, k>={int(cluster_threshold)})"
+        else:
+            def _np_logp(two_sided_test: bool, second_level_contrast):
+                return non_parametric_inference(
+                    second_level_input=second_level_input,
+                    design_matrix=design_matrix,
+                    second_level_contrast=second_level_contrast,
+                    mask=resolved_mask_img,
+                    smoothing_fwhm=smoothing_fwhm,
+                    model_intercept=False,
+                    n_perm=int(n_perm),
+                    two_sided_test=bool(two_sided_test),
+                    random_state=random_state,
+                    n_jobs=int(n_jobs),
+                    verbose=int(verbose),
+                    threshold=cluster_forming_p_threshold,
+                    tfce=bool(tfce),
+                )
+
+            def _extract_t(ret):
+                if isinstance(ret, dict) and "t" in ret:
+                    return ret["t"]
+                return None
+
+            def _select_logp(ret):
+                if not isinstance(ret, dict):
+                    return ret
+                if bool(tfce) and "logp_max_tfce" in ret:
+                    return ret["logp_max_tfce"]
+                if cluster_forming_p_threshold is not None and "logp_max_size" in ret:
+                    return ret["logp_max_size"]
+                if "logp_max_t" in ret:
+                    return ret["logp_max_t"]
+                keys = sorted(ret.keys())
+                raise ValueError(
+                    "Unsupported non_parametric_inference outputs; expected one of "
+                    "logp_max_t / logp_max_size / logp_max_tfce. "
+                    f"Got keys: {keys}"
+                )
+
+            logp_thr = float(-np.log10(alpha))
+            alpha_tag = str(alpha).replace(".", "p")
+            tfce_tag = "_tfce" if bool(tfce) else ""
+            if cluster_forming_p_threshold is None:
+                cfp_tag = ""
+            else:
+                cfp_tag = f"_cfp{str(cluster_forming_p_threshold).replace('.', 'p')}"
+
+            raw_dir = reg_dir / "nonparametric_raw"
+            raw_dir.mkdir(parents=True, exist_ok=True)
+
+            reg_idx = regressor_names.index(reg_name)
+            c_pos = [0.0] * len(regressor_names)
+            c_pos[reg_idx] = 1.0
+            c_neg = [0.0] * len(regressor_names)
+            c_neg[reg_idx] = -1.0
+
+            # gt (one-sided)
+            logp_gt_ret = _np_logp(False, c_pos)
+            logp_gt_img = _select_logp(logp_gt_ret)
+            t_gt_img = _extract_t(logp_gt_ret) or t_scores_img
+            try:
+                logp_gt_img.to_filename(str(raw_dir / f"logp_vfwe_alpha{alpha_tag}{tfce_tag}{cfp_tag}_gt.nii.gz"))
+            except Exception:
+                pass
+            gt_mask = np.asarray(logp_gt_img.dataobj) >= logp_thr
+            t_gt_data = np.asarray(t_gt_img.dataobj)
+            thresholded_gt_map = image.new_img_like(
+                t_gt_img, np.where(gt_mask & (t_gt_data > 0), t_gt_data, 0.0), copy_header=True
+            )
+            thresholded_gt_path = reg_dir / f"tmap_vfwe_alpha{alpha_tag}{tfce_tag}{cfp_tag}{transformation_tag}_gt_onesided.nii.gz"
+            thresholded_gt_map.to_filename(str(thresholded_gt_path))
+
+            # Two-sided
+            logp_two_ret = _np_logp(True, c_pos)
+            logp_two_img = _select_logp(logp_two_ret)
+            t_two_img = _extract_t(logp_two_ret) or t_scores_img
+            try:
+                logp_two_img.to_filename(str(raw_dir / f"logp_vfwe_alpha{alpha_tag}{tfce_tag}{cfp_tag}_two_sided.nii.gz"))
+            except Exception:
+                pass
+            two_mask = np.asarray(logp_two_img.dataobj) >= logp_thr
+            t_two_data = np.asarray(t_two_img.dataobj)
+            thresholded_two_sided_map = image.new_img_like(
+                t_two_img, np.where(two_mask, t_two_data, 0.0), copy_header=True
+            )
+            thresholded_two_sided_path = reg_dir / f"tmap_vfwe_alpha{alpha_tag}{tfce_tag}{cfp_tag}{transformation_tag}.nii.gz"
+            thresholded_two_sided_map.to_filename(str(thresholded_two_sided_path))
+
+            # lt (one-sided), output positive values
+            logp_lt_ret = _np_logp(False, c_neg)
+            logp_lt_img = _select_logp(logp_lt_ret)
+            t_lt_img = _extract_t(logp_lt_ret) or t_scores_img
+            try:
+                logp_lt_img.to_filename(str(raw_dir / f"logp_vfwe_alpha{alpha_tag}{tfce_tag}{cfp_tag}_lt.nii.gz"))
+            except Exception:
+                pass
+            lt_mask = np.asarray(logp_lt_img.dataobj) >= logp_thr
+            t_lt_data = np.asarray(t_lt_img.dataobj)
+            thresholded_lt_map = image.new_img_like(
+                t_lt_img, np.where(lt_mask & (t_lt_data < 0), -t_lt_data, 0.0), copy_header=True
+            )
+            thresholded_lt_path = reg_dir / f"tmap_vfwe_alpha{alpha_tag}{tfce_tag}{cfp_tag}{transformation_tag}_lt_onesided.nii.gz"
+            thresholded_lt_map.to_filename(str(thresholded_lt_path))
+
+            base_stem = f"tmap_vfwe_alpha{alpha_tag}{tfce_tag}{cfp_tag}{transformation_tag}"
+            base_title = f"{reg_name}: t-map (vfwe, alpha={alpha})"
+            gt_title = f"{reg_name}: t-map > 0 (one-sided, vfwe, alpha={alpha})"
+            lt_title = f"{reg_name}: t-map < 0 (one-sided, vfwe, alpha={alpha})"
+
+        mosaic_two_sided_png = _render_mosaic(thresholded_two_sided_map, out_dir_local=reg_dir, file_stem=base_stem, title=base_title)
+        mosaic_gt_png = _render_mosaic(
+            thresholded_gt_map, out_dir_local=reg_dir, file_stem=f"{base_stem}_gt_onesided", title=gt_title
+        )
+        mosaic_lt_png = _render_mosaic(
+            thresholded_lt_map, out_dir_local=reg_dir, file_stem=f"{base_stem}_lt_onesided", title=lt_title
+        )
+
+        outputs[str(reg_name)] = SecondLevelOutputs(
+            maps_dir=(maps_dir if maps_dir is not None else group_dir),
+            group_dir=reg_dir,
+            template_image_path=template_image_path,
+            t_unc_path=t_unc_path,
+            thresholded_two_sided_path=thresholded_two_sided_path,
+            mosaic_two_sided_png=mosaic_two_sided_png,
+            thresholded_gt_path=thresholded_gt_path,
+            thresholded_lt_path=thresholded_lt_path,
+            mosaic_gt_png=mosaic_gt_png,
+            mosaic_lt_png=mosaic_lt_png,
+            used_map_paths=map_paths,
+        )
+
+    return outputs
 
 
 def main():

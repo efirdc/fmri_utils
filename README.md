@@ -53,6 +53,39 @@ You can also run it in module mode:
 python -m fmri_utils.second_level_analysis second_level /path/to/mni_subject_maps
 ```
 
+### Input modes for `second_level`
+
+The first positional argument to `second_level` is `maps`. It can be:
+
+- **Directory path**: a folder containing **only** subject-level NIfTI maps (`.nii`/`.nii.gz`) to enter into the model (non-recursive).
+- **CSV/TSV path**: a “design file” with a required `path` (or `map_path`) column plus any number of numeric covariate columns.
+
+#### Example: CSV/TSV with covariates
+
+Create a CSV like:
+
+```csv
+path,expertise,is_patient
+/path/to/sub-001_contrast_map_mni.nii.gz,-1.12,0
+/path/to/sub-002_contrast_map_mni.nii.gz,0.34,1
+/path/to/sub-003_contrast_map_mni.nii.gz,0.78,0
+```
+
+Then run:
+
+```bash
+fmri-utils second_level /path/to/design.csv \
+  --inference=parametric \
+  --height_control=fdr \
+  --cluster_threshold=20
+```
+
+Outputs are written to `out_dir` (or a default `group/` folder), with one subfolder per regressor (including `intercept`):
+
+- `.../group/intercept/`
+- `.../group/expertise/`
+- `.../group/is_patient/`
+
 ### Common flags
 
 - `--inference=parametric|non_parametric`: parametric (default) or permutation inference (voxelwise FWER)
@@ -77,23 +110,44 @@ fmri-utils second_level \
 ## Call from Python
 
 ```python
+import pandas as pd
 from fmri_utils.second_level_analysis import second_level_one_sample_ttest
 
-out = second_level_one_sample_ttest(
-    maps_dir="/path/to/mni_subject_maps",
+design = pd.DataFrame(
+    {
+        "path": [
+            "/path/to/sub-001_contrast_map_mni.nii.gz",
+            "/path/to/sub-002_contrast_map_mni.nii.gz",
+            "/path/to/sub-003_contrast_map_mni.nii.gz",
+        ],
+        # Continuous covariate (already z-scored)
+        "expertise": [-1.12, 0.34, 0.78],
+        # Binary categorical covariate encoded as 0/1
+        "is_patient": [0, 1, 0],
+    }
+)
+
+outs = second_level_one_sample_ttest(
+    design,
     inference="parametric",
     height_control="fdr",
     cluster_threshold=20,
 )
-print(out.group_dir)
+print(outs["intercept"].group_dir)
 ```
 
 ### Parameters
 
 Core inputs:
-- `maps_dir`: Directory containing **only** subject-level NIfTI maps (`.nii`/`.nii.gz`). Output will be written to `maps_dir/group/`.
-- `out_dir`: Optional output directory. Defaults to `maps_dir/group/`.
+- `maps`: One of:
+  - a directory path of subject-level NIfTI maps, or
+  - a CSV/TSV path with a `path` column plus covariates, or
+  - a pandas DataFrame with a `path` column plus covariates.
+- `out_dir`: Optional output directory. Defaults to `maps/group/` when `maps` is a directory path; otherwise defaults to `./group/`.
 - `overwrite`: If `True`, recompute outputs even if they already exist.
+
+Design / covariates:
+- If covariate columns are provided, **one set of outputs is produced per regressor**, written to `{out_dir}/{regressor_name}/...` (including `intercept`).
 
 Optional preprocessing:
 - `transformation`: Optional preprocessing applied **in-memory** to each input map before running inference.
@@ -107,7 +161,8 @@ Plotting:
 
 Example: set explicit cut coordinates per axis (dict `<str: 1D ndarray>` style):
 ```bash
---plot_kwargs="{'display_mode': 'mosaic', 'cut_coords': {'x': (-40, -20, 0, 20, 40), 'y': (-30, -10, 10, 30), 'z': (-20, 0, 20)}}"
+fmri-utils second_level /path/to/design.csv \
+  --plot_kwargs="{'display_mode': 'mosaic', 'cut_coords': {'x': (-40, -20, 0, 20, 40), 'y': (-30, -10, 10, 30), 'z': (-20, 0, 20)}}"
 ```
 Outputs:
 - `args.json`: The CLI/function writes an `args.json` into the output directory containing the relevant parameters used for the run.
@@ -117,7 +172,7 @@ Masking / plotting:
   - a path to a NIfTI mask, or
   - `"mni_template"` / `"mni"` / `"mni152"` (uses nilearn’s bundled MNI template and binarizes it with `>0`).
   This mask is passed into the model and also used to restrict which voxels enter multiple-comparisons correction for the one-sided maps.
-- `template_image`: Optional background image used for plotting. If not provided, the nilearn MNI template is used and also written into `maps_dir/group/`.
+- `template_image`: Optional background image used for plotting. If not provided, the nilearn MNI template is used and written into `out_dir` when possible.
 - `cmap`: Matplotlib colormap name used by nilearn plotting.
 
 Parametric inference mode (`inference="parametric"`):
