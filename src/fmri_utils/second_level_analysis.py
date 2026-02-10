@@ -485,7 +485,18 @@ def second_level_one_sample_ttest(
                     "Your nilearn threshold_stats_img does not support mask_img=. "
                     "Upgrade nilearn to enable tail-masked one-sided thresholding."
                 )
-        thr_img, _ = threshold_stats_img(stat_img, **kwargs_local)
+        try:
+            thr_img, _ = threshold_stats_img(stat_img, **kwargs_local)
+        except ValueError as e:
+            # nilearn can still raise on some edge cases (e.g. threshold=inf or empty data after
+            # internal resampling/masking), with an error like:
+            #   "zero-size array to reduction operation maximum which has no identity"
+            msg = str(e).lower()
+            if "zero-size array" in msg and "maximum" in msg:
+                empty = image.new_img_like(stat_img, np.zeros(stat_img.shape, dtype=np.float32))
+                empty.to_filename(str(out_path))
+                return empty
+            raise
         thr_img.to_filename(str(out_path))
         return thr_img
 

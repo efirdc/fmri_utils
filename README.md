@@ -31,6 +31,18 @@ python -m pip install --upgrade pip
 pip install "git+https://github.com/efirdc/fmri_utils.git"
 ```
 
+If you installed before and want the latest features (e.g., CSV/design-matrix input for `second_level`), use:
+
+```bash
+pip install --upgrade --no-cache-dir "git+https://github.com/efirdc/fmri_utils.git"
+```
+
+To confirm what you have installed:
+
+```bash
+python -m pip show fmri-utils
+```
+
 ### Option B: clone with git and install in editable mode (recommended for development)
 
 ```bash
