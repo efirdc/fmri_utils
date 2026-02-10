@@ -263,11 +263,34 @@ def second_level_one_sample_ttest(
                         raise ValueError(f"`maps` must be 1D when array-like; got shape={arr.shape}")
                     df0 = pd.DataFrame({"path": [str(Path(x)) for x in arr.tolist()]})
 
+        # Normalize column names to make CSVs robust to BOM/whitespace/case differences
+        # (common when saving from Excel/Numbers).
+        def _norm_col(c: object) -> str:
+            return str(c).strip().lstrip("\ufeff")
+
+        original_cols = list(df0.columns)
+        normalized_cols = [_norm_col(c) for c in original_cols]
+        df0.columns = normalized_cols
+
+        # Allow case-insensitive lookup for the path column.
+        cols_lower = {c.lower(): c for c in df0.columns}
         if "path" not in df0.columns:
-            if "map_path" in df0.columns:
-                df0 = df0.rename(columns={"map_path": "path"})
+            if "path" in cols_lower:
+                df0 = df0.rename(columns={cols_lower["path"]: "path"})
+            elif "map_path" in cols_lower:
+                df0 = df0.rename(columns={cols_lower["map_path"]: "path"})
             else:
-                raise ValueError("`maps` dataframe/CSV must include a 'path' (or 'map_path') column.")
+                # Heuristic: delimiter/header issues can cause a single "giant" column name.
+                if len(df0.columns) == 1 and any(ch in df0.columns[0] for ch in [",", ";", "\t"]):
+                    raise ValueError(
+                        "Could not find a 'path' column in your CSV/TSV. "
+                        "It looks like the file may not have been parsed with the right delimiter. "
+                        "Please re-save as a standard CSV with a header row that includes a 'path' column."
+                    )
+                raise ValueError(
+                    "`maps` dataframe/CSV must include a 'path' (or 'map_path') column. "
+                    f"Found columns: {list(df0.columns)}"
+                )
 
         df0["path"] = df0["path"].astype(str)
         return maps_dir0, df0
