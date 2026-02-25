@@ -119,6 +119,28 @@ def _as_binary_mask(mask_img: nib.Nifti1Image) -> nib.Nifti1Image:
     return image.new_img_like(mask_img, mask.astype(np.uint8), copy_header=True)
 
 
+def _apply_binary_mask_to_stat_img(
+    stat_img: nib.Nifti1Image,
+    mask_img: nib.Nifti1Image,
+) -> nib.Nifti1Image:
+    """Force stat-map values outside mask to 0 while preserving geometry."""
+    m_img = mask_img
+    if m_img.shape != stat_img.shape:
+        sig = inspect.signature(image.resample_to_img)
+        kwargs = {"interpolation": "nearest"}
+        if "force_resample" in sig.parameters:
+            kwargs["force_resample"] = True
+        if "copy_header" in sig.parameters:
+            kwargs["copy_header"] = True
+        m_img = image.resample_to_img(m_img, stat_img, **kwargs)
+    m = np.asarray(m_img.dataobj)
+    m = np.isfinite(m) & (m > 0)
+    s = np.asarray(stat_img.dataobj, dtype=np.float32)
+    s = np.nan_to_num(s, nan=0.0, posinf=0.0, neginf=0.0)
+    out = np.where(m, s, 0.0).astype(np.float32, copy=False)
+    return image.new_img_like(stat_img, out, copy_header=True)
+
+
 def _voxelwise_count_mean_std(
     imgs: List[Path],
     *,
@@ -366,8 +388,20 @@ def second_level_one_sample_ttest(
     if mask_image is None:
         resolved_mask_img = load_mni152_brain_mask()
     else:
-        if isinstance(mask_image, str) and mask_image.lower() in ("mni", "mni_template", "mni152", "mni_brain", "mni_brain_mask"):
+        if isinstance(mask_image, str) and mask_image.lower() in ("mni", "mni152", "mni_brain", "mni_brain_mask"):
             resolved_mask_img = load_mni152_brain_mask()
+        elif isinstance(mask_image, str) and mask_image.lower() in (
+            "mni_template",
+            "mni152_template",
+            "mni_t1w_template",
+        ):
+            # Use MNI T1w template as a mask by binarizing > 0 (covers the template support).
+            # The mask is later resampled onto the first map grid, so subject maps remain in their native resolution.
+            sig = inspect.signature(load_mni152_template)
+            if "resolution" in sig.parameters:
+                resolved_mask_img = load_mni152_template(resolution=2)
+            else:
+                resolved_mask_img = load_mni152_template()
         elif isinstance(mask_image, (str, Path)):
             resolved_mask_img = image.load_img(str(mask_image))
         else:
@@ -389,6 +423,7 @@ def second_level_one_sample_ttest(
         except Exception:
             # If resampling isn't available for some reason, continue with the provided mask.
             pass
+        resolved_mask_img = _as_binary_mask(resolved_mask_img)
 
     # Optional: exclude near-zero between-subject variance voxels (often border/coverage artifacts).
     validity_mask_img: Optional[nib.Nifti1Image] = None
@@ -480,13 +515,6 @@ def second_level_one_sample_ttest(
         allowed = set(sig.parameters.keys())
         unknown = sorted([k for k in threshold_kwargs.keys() if k not in allowed])
         if unknown:
-            if "transformation" in unknown:
-                raise ValueError(
-                    "Got an unexpected argument 'transformation' forwarded into nilearn.threshold_stats_img(). "
-                    "This usually means you're running an older installed version of fmri-utils that does not "
-                    "support the --transformation CLI flag, so Fire treated it as an extra kwarg. "
-                    "Upgrade fmri-utils and try again (e.g. `pip install --upgrade \"git+https://github.com/efirdc/fmri_utils.git\"`)."
-                )
             raise ValueError(
                 "Unsupported thresholding kwargs passed via **threshold_kwargs: "
                 f"{unknown}. These kwargs are forwarded to nilearn.glm.threshold_stats_img; "
@@ -520,6 +548,9 @@ def second_level_one_sample_ttest(
                 empty.to_filename(str(out_path))
                 return empty
             raise
+        if mask_img is not None:
+            # Ensure saved thresholded maps are spatially restricted to the provided mask.
+            thr_img = _apply_binary_mask_to_stat_img(thr_img, mask_img)
         thr_img.to_filename(str(out_path))
         return thr_img
 
