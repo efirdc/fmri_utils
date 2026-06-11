@@ -10,6 +10,8 @@ import inspect
 import numpy as np
 import pandas as pd
 import nibabel as nib
+from scipy import ndimage
+from scipy import stats
 
 # Nilearn may warn on HPC/headless nodes when it detects a non-interactive backend (e.g. 'agg').
 # This warning is noisy but harmless for batch runs that only save figures to disk.
@@ -111,8 +113,6 @@ def _apply_transformation_img(
 def _as_binary_mask(mask_img: nib.Nifti1Image) -> nib.Nifti1Image:
     """
     Ensure a mask is binary (0/1) by thresholding > 0.
-
-    This allows passing continuous images (e.g. MNI T1 template) as a mask.
     """
     data = np.asarray(mask_img.dataobj)
     mask = np.isfinite(data) & (data > 0)
@@ -229,6 +229,9 @@ def second_level_one_sample_ttest(
     alpha: float = 0.05,
     height_control: str = "fdr",
     cluster_threshold: int = 20,
+    unc_p_threshold: float = 0.001,
+    unc_p_threshold_grid: Optional[Sequence[float]] = (0.01, 0.005, 0.001),
+    unc_cluster_threshold_grid: Sequence[int] = (0, 10, 20),
     cmap: str = "RdBu_r",
     overwrite: bool = False,
     **threshold_kwargs,
@@ -326,6 +329,24 @@ def second_level_one_sample_ttest(
     )
     group_dir.mkdir(parents=True, exist_ok=True)
 
+    # Backward-compatible handling:
+    # - If unc_p_threshold_grid is provided, emit all listed thresholds.
+    # - Otherwise, fall back to legacy single unc_p_threshold behavior.
+    if unc_p_threshold_grid is None:
+        unc_p_threshold_values = (float(unc_p_threshold),)
+    else:
+        unc_p_threshold_values = tuple(float(p) for p in unc_p_threshold_grid)
+    if len(unc_p_threshold_values) == 0:
+        raise ValueError("unc_p_threshold_grid must contain at least one p value")
+    if any((not np.isfinite(p)) or p <= 0.0 or p >= 1.0 for p in unc_p_threshold_values):
+        raise ValueError(f"All unc p thresholds must be in (0, 1); got {unc_p_threshold_values}")
+    # Keep a stable order and drop duplicates.
+    unc_p_threshold_values = tuple(dict.fromkeys(unc_p_threshold_values))
+
+    unc_cluster_threshold_grid = tuple(int(k) for k in unc_cluster_threshold_grid)
+    if any(int(k) < 0 for k in unc_cluster_threshold_grid):
+        raise ValueError(f"unc_cluster_threshold_grid values must be >= 0; got {unc_cluster_threshold_grid}")
+
     map_paths = [Path(p) for p in maps_df["path"].tolist()]
     if len(map_paths) == 0:
         raise ValueError("No subject NIfTI maps provided.")
@@ -370,6 +391,9 @@ def second_level_one_sample_ttest(
             "alpha": float(alpha),
             "height_control": height_control,
             "cluster_threshold": int(cluster_threshold),
+            "unc_p_threshold": float(unc_p_threshold),
+            "unc_p_threshold_grid": [float(p) for p in unc_p_threshold_values],
+            "unc_cluster_threshold_grid": [int(k) for k in unc_cluster_threshold_grid],
             "cmap": cmap,
             "overwrite": bool(overwrite),
             "threshold_kwargs": threshold_kwargs,
@@ -381,27 +405,19 @@ def second_level_one_sample_ttest(
 
     # Default mask:
     # - If caller provides a mask, we use it.
-    # - Otherwise, we default to the MNI152 *brain mask* (not the T1 template volume).
-    # - If caller provides `template_image` and no explicit `mask_image`, we still default
-    #   to the MNI brain mask (template_image controls plotting/background, not analysis mask).
+    # - Otherwise, we default to the MNI152 brain mask.
+    # - `template_image` is only for plotting/background; it is never treated as an analysis mask.
     resolved_mask_img: Optional[nib.Nifti1Image] = None
     if mask_image is None:
         resolved_mask_img = load_mni152_brain_mask()
     else:
         if isinstance(mask_image, str) and mask_image.lower() in ("mni", "mni152", "mni_brain", "mni_brain_mask"):
             resolved_mask_img = load_mni152_brain_mask()
-        elif isinstance(mask_image, str) and mask_image.lower() in (
-            "mni_template",
-            "mni152_template",
-            "mni_t1w_template",
-        ):
-            # Use MNI T1w template as a mask by binarizing > 0 (covers the template support).
-            # The mask is later resampled onto the first map grid, so subject maps remain in their native resolution.
-            sig = inspect.signature(load_mni152_template)
-            if "resolution" in sig.parameters:
-                resolved_mask_img = load_mni152_template(resolution=2)
-            else:
-                resolved_mask_img = load_mni152_template()
+        elif isinstance(mask_image, str) and mask_image.lower() in ("mni_template", "mni152_template", "mni_t1w_template"):
+            raise ValueError(
+                "mask_image values ('mni_template', 'mni152_template', 'mni_t1w_template') are no longer supported. "
+                "Use mask_image='mni_brain_mask' for analysis masking and template_image='mni_template' for plotting."
+            )
         elif isinstance(mask_image, (str, Path)):
             resolved_mask_img = image.load_img(str(mask_image))
         else:
@@ -554,6 +570,82 @@ def second_level_one_sample_ttest(
         thr_img.to_filename(str(out_path))
         return thr_img
 
+    def _cluster_extent_filter(mask_bool: np.ndarray, k_min: int) -> np.ndarray:
+        if int(k_min) <= 1:
+            return mask_bool
+        # 6-connectivity for volumetric clusters.
+        structure = ndimage.generate_binary_structure(rank=3, connectivity=1)
+        labels, n_labels = ndimage.label(mask_bool, structure=structure)
+        if n_labels == 0:
+            return np.zeros(mask_bool.shape, dtype=bool)
+        counts = np.bincount(labels.ravel())
+        keep_labels = np.flatnonzero(counts >= int(k_min))
+        keep_labels = keep_labels[keep_labels != 0]
+        if keep_labels.size == 0:
+            return np.zeros(mask_bool.shape, dtype=bool)
+        return np.isin(labels, keep_labels)
+
+    def _threshold_uncorrected_t_and_cache(
+        stat_img,
+        *,
+        out_path: Path,
+        p_unc: float,
+        dof: int,
+        cluster_k: int,
+        mask_img: Optional[nib.Nifti1Image] = None,
+    ):
+        t_crit = float(stats.t.isf(float(p_unc) / 2.0, df=int(dof)))
+        if out_path.exists() and not overwrite:
+            cached = image.load_img(str(out_path))
+            cached_data = np.asarray(cached.dataobj, dtype=np.float32)
+            finite = np.isfinite(cached_data)
+            subthreshold_nonzero = finite & (cached_data != 0) & (np.abs(cached_data) < t_crit)
+            if np.any(subthreshold_nonzero):
+                fixed = np.where(finite & (np.abs(cached_data) >= t_crit), cached_data, 0.0).astype(
+                    np.float32,
+                    copy=False,
+                )
+                fixed_img = image.new_img_like(cached, fixed, copy_header=False)
+                if mask_img is not None:
+                    fixed_img = _apply_binary_mask_to_stat_img(fixed_img, mask_img)
+                fixed_img.to_filename(str(out_path))
+                return fixed_img
+            return cached
+
+        stat_data = np.asarray(stat_img.dataobj, dtype=np.float32)
+        valid = np.isfinite(stat_data)
+        if mask_img is not None:
+            m = np.asarray(mask_img.dataobj)
+            m = np.isfinite(m) & (m > 0)
+            if m.shape != stat_data.shape:
+                raise ValueError(
+                    f"Mask/stat shape mismatch after alignment: {m.shape} vs {stat_data.shape}"
+                )
+            valid &= m
+
+        finite_vals = stat_data[valid]
+        if finite_vals.size == 0 or float(np.max(np.abs(finite_vals))) == 0.0:
+            empty = image.new_img_like(stat_img, np.zeros(stat_img.shape, dtype=np.float32))
+            empty.to_filename(str(out_path))
+            return empty
+
+        supra = valid & (np.abs(stat_data) >= t_crit)
+        if int(cluster_k) > 0:
+            # Apply extent threshold per sign so opposite tails cannot merge.
+            pos_keep = _cluster_extent_filter(supra & (stat_data > 0), int(cluster_k))
+            neg_keep = _cluster_extent_filter(supra & (stat_data < 0), int(cluster_k))
+            keep = pos_keep | neg_keep
+        else:
+            keep = supra
+
+        out = np.zeros(stat_data.shape, dtype=np.float32)
+        out[keep] = stat_data[keep]
+        thr_img = image.new_img_like(stat_img, out, copy_header=False)
+        if mask_img is not None:
+            thr_img = _apply_binary_mask_to_stat_img(thr_img, mask_img)
+        thr_img.to_filename(str(out_path))
+        return thr_img
+
     # ---- Design matrix (intercept + optional covariates) ----
     covariate_cols = [c for c in maps_df.columns if c != "path"]
     if covariate_cols:
@@ -573,6 +665,9 @@ def second_level_one_sample_ttest(
     # Fit a parametric GLM once for (a) parametric inference and (b) QC t-maps in non-parametric mode.
     slm = SecondLevelModel(smoothing_fwhm=smoothing_fwhm, mask_img=resolved_mask_img)
     slm = slm.fit(second_level_input, design_matrix=design_matrix)
+    n_subjects = int(len(map_paths))
+    design_rank = int(np.linalg.matrix_rank(design_matrix.to_numpy(dtype=float)))
+    dof_resid = int(max(1, n_subjects - design_rank))
 
     # Plot background template (shared across contrasts)
     template_image_path: Optional[Path] = None
@@ -610,10 +705,30 @@ def second_level_one_sample_ttest(
         plot_kwargs_local.setdefault("colorbar", True)
         plot_kwargs_local.setdefault("cmap", cmap)
         plot_kwargs_local.setdefault("title", title)
+        # Keep thresholded-map backgrounds transparent and enforce a fixed display
+        # scale across analyses for easier visual comparison.
+        plot_kwargs_local.setdefault("threshold", 1.0)
+        plot_kwargs_local.setdefault("vmin", -5.0)
+        plot_kwargs_local.setdefault("vmax", 5.0)
+        plot_kwargs_local.setdefault("symmetric_cbar", True)
 
         mosaic = out_dir_local / f"{file_stem}_mosaic.png"
+        stat_img_for_plot = stat_img
+        plot_threshold = float(plot_kwargs_local.get("threshold", 1e-6))
+        if plot_threshold > 0:
+            stat_data = np.asarray(stat_img.dataobj, dtype=np.float32)
+            finite = np.isfinite(stat_data)
+            if np.any(finite & (stat_data != 0) & (np.abs(stat_data) < plot_threshold)):
+                stat_img_for_plot = image.new_img_like(
+                    stat_img,
+                    np.where(finite & (np.abs(stat_data) >= plot_threshold), stat_data, 0.0).astype(
+                        np.float32,
+                        copy=False,
+                    ),
+                    copy_header=False,
+                )
         display = plotting.plot_stat_map(
-            stat_img,
+            stat_img_for_plot,
             bg_img=bg_img,
             **plot_kwargs_local,
         )
@@ -643,6 +758,25 @@ def second_level_one_sample_ttest(
         else:
             t_scores_img = slm.compute_contrast(reg_name, output_type="stat")
             t_scores_img.to_filename(str(t_unc_path))
+
+        for unc_p in unc_p_threshold_values:
+            unc_p_tag = str(float(unc_p)).replace(".", "p")
+            for unc_k in unc_cluster_threshold_grid:
+                unc_path = reg_dir / f"tmap_unc_p{unc_p_tag}_k{int(unc_k)}{transformation_tag}.nii.gz"
+                unc_map = _threshold_uncorrected_t_and_cache(
+                    t_scores_img,
+                    out_path=unc_path,
+                    p_unc=float(unc_p),
+                    dof=int(dof_resid),
+                    cluster_k=int(unc_k),
+                    mask_img=(resolved_mask_img if bool(use_mask_in_thresholding) else None),
+                )
+                _render_mosaic(
+                    unc_map,
+                    out_dir_local=reg_dir,
+                    file_stem=f"tmap_unc_p{unc_p_tag}_k{int(unc_k)}{transformation_tag}",
+                    title=f"{reg_name}: t-map uncorrected p<={unc_p} (two-sided), k>={int(unc_k)}",
+                )
 
         if inference == "parametric":
             alpha_tag = str(alpha).replace(".", "p")
@@ -817,5 +951,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
