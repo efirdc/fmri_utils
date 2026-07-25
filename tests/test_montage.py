@@ -60,6 +60,32 @@ class MontageTests(unittest.TestCase):
             self.assertTrue(created[0].exists())
             self.assertEqual(created[0].name, "test_metric_axial_z_002.png")
 
+    def test_sequential_slice_filenames_and_subject_background(self) -> None:
+        ref = _img(np.ones((10, 10, 4), dtype=np.float32))
+        effect = _img(np.zeros((10, 10, 4), dtype=np.float32))
+        background = _img(np.arange(400, dtype=np.float32).reshape(10, 10, 4))
+        cfg = MontageConfig(
+            mode="solid",
+            slice_indices=(3, 1),
+            slice_labels=(-42, 18),
+            grid_rows=1,
+            grid_cols=1,
+            filename_prefix="indexed",
+            filename_slice_index_only=True,
+            show_legend=False,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            created = render_axial_subject_montage_series(
+                [SubjectMap("sub-0001", effect, background_img=background)],
+                ref,
+                Path(tmp),
+                cfg,
+            )
+            self.assertEqual(
+                [path.name for path in created],
+                ["indexed_axial_slice_000.png", "indexed_axial_slice_001.png"],
+            )
+
     def test_include_mask_darkening_only_affects_outside_mask(self) -> None:
         bg = np.ones((4, 4), dtype=np.float32)
         include = np.zeros((4, 4), dtype=bool)

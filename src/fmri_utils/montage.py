@@ -22,6 +22,7 @@ class SubjectMap:
     subject_id: str
     effect_img: SpatialImage
     include_mask_img: SpatialImage | None = None
+    background_img: SpatialImage | None = None
 
 
 @dataclass(frozen=True)
@@ -73,6 +74,7 @@ class MontageConfig:
     outside_include_darken_factor: float = 0.58
 
     filename_prefix: str = "map"
+    filename_slice_index_only: bool = False
     title_prefix: str = ""
     cbar_label: str = "value"
     show_legend: bool = True
@@ -293,6 +295,8 @@ def render_axial_subject_montage_series(
     subjects: list[str] = []
     effect_stack: list[np.ndarray] = []
     include_stack: list[np.ndarray] = []
+    background_stack: list[np.ndarray] = []
+    background_ranges: list[tuple[float, float]] = []
     for idx, subject_map in enumerate(subject_maps):
         _validate_spatial_image(f"subject_maps[{idx}].effect_img", subject_map.effect_img)
         _validate_alignment(reference_img, f"subject_maps[{idx}].effect_img", subject_map.effect_img, affine_tol)
@@ -307,6 +311,26 @@ def render_axial_subject_montage_series(
         else:
             include_data = finite
         include_stack.append(include_data.astype(bool, copy=False))
+
+        if subject_map.background_img is not None:
+            _validate_spatial_image(f"subject_maps[{idx}].background_img", subject_map.background_img)
+            _validate_alignment(reference_img, f"subject_maps[{idx}].background_img", subject_map.background_img, affine_tol)
+            background_data = np.asarray(subject_map.background_img.get_fdata(dtype=np.float32))
+        else:
+            background_data = reference_data
+        background_stack.append(background_data)
+        background_finite = background_data[np.isfinite(background_data) & (background_data > 0)]
+        if background_finite.size == 0:
+            background_finite = background_data[np.isfinite(background_data)]
+        if background_finite.size == 0:
+            background_ranges.append((0.0, 1.0))
+        else:
+            background_ranges.append(
+                (
+                    float(np.percentile(background_finite, 2.0)),
+                    float(np.percentile(background_finite, 98.0)),
+                )
+            )
         subjects.append(str(subject_map.subject_id))
 
     n_panels = int(config.grid_rows) * int(config.grid_cols)
@@ -320,6 +344,8 @@ def render_axial_subject_montage_series(
         subjects.insert(reserve_index, reserve_subject)
         effect_stack.insert(reserve_index, np.full(reference_data.shape, np.nan, dtype=np.float32))
         include_stack.insert(reserve_index, np.zeros(reference_data.shape, dtype=bool))
+        background_stack.insert(reserve_index, reference_data)
+        background_ranges.insert(reserve_index, (0.0, 1.0))
         reserved_blank_index = reserve_index
 
     x0, x1, y0, y1 = _compute_crop_bounds(reference_data, config.crop_pad_voxels)
@@ -422,7 +448,7 @@ def render_axial_subject_montage_series(
                     ax.axis("off")
                     continue
 
-                bg = reference_data[x0 : x1 + 1, y0 : y1 + 1, z_idx].T
+                bg = background_stack[i][x0 : x1 + 1, y0 : y1 + 1, z_idx].T
                 include_slice = include_stack[i][x0 : x1 + 1, y0 : y1 + 1, z_idx].T
                 bg_plot = _compute_background_with_darken(
                     bg,
@@ -432,7 +458,15 @@ def render_axial_subject_montage_series(
                 )
                 ov = overlays[i][x0 : x1 + 1, y0 : y1 + 1, z_idx].T
 
-                ax.imshow(bg_plot, cmap="gray", vmin=bg_vmin, vmax=bg_vmax, origin="lower", interpolation="none")
+                panel_bg_vmin, panel_bg_vmax = background_ranges[i]
+                ax.imshow(
+                    bg_plot,
+                    cmap="gray",
+                    vmin=panel_bg_vmin,
+                    vmax=panel_bg_vmax,
+                    origin="lower",
+                    interpolation="none",
+                )
                 ov_masked = np.ma.masked_invalid(ov)
                 if config.mode == "solid" and bool(config.solid_alpha_by_magnitude):
                     vmax_abs = max(abs(float(norm_obj.vmin)), abs(float(norm_obj.vmax)))
@@ -535,7 +569,11 @@ def render_axial_subject_montage_series(
                 ax_legend.axis("off")
                 _draw_legend_grid(ax_legend, ordered_regions, legend_cols, float(config.legend_fontsize))
 
-            out_png = job_dir / f"{config.filename_prefix}_axial_z_{z_label:03d}.png"
+            if config.filename_slice_index_only:
+                filename = f"{config.filename_prefix}_axial_slice_{slice_pos:03d}.png"
+            else:
+                filename = f"{config.filename_prefix}_axial_z_{z_label:03d}.png"
+            out_png = job_dir / filename
             fig.savefig(out_png, dpi=int(config.dpi), facecolor="white")
             plt.close(fig)
             created.append(out_png)
