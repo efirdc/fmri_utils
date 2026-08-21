@@ -35,9 +35,12 @@ from .encoding import (
     discover_fmriprep_runs,
     fit_encoding,
     fmriprep_nuisance_columns,
+    load_chunk_manifest,
     load_run_manifest,
     load_subject_data,
+    make_chunk_manifest,
     save_encoding_result,
+    stitch_encoding_chunks,
 )
 
 __all__ = [
@@ -63,7 +66,10 @@ __all__ = [
     "discover_fmriprep_runs",
     "fit_encoding",
     "fmriprep_nuisance_columns",
+    "load_chunk_manifest",
     "load_run_manifest",
     "load_subject_data",
+    "make_chunk_manifest",
     "save_encoding_result",
+    "stitch_encoding_chunks",
 ]

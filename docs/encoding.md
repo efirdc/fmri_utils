@@ -19,6 +19,7 @@ that manifest.
 - fold-local correlations and R2
 - optional within-run block-shuffle permutations
 - native-space NIfTI maps, fold maps, prediction traces, and JSON provenance
+- voxel-chunked array execution with strict stitching validation
 
 The package does not extract language-model features or infer stimulus timing.
 Those steps are experiment-specific. The feature matrix supplied for each run
@@ -273,21 +274,8 @@ otherwise inflate the null.
 
 ## Outputs
 
-Each fit writes:
-
-- `mean_correlation` and `mean_r2` 3D maps;
-- `outer_fold_correlation` and `outer_fold_r2` 4D maps;
-- outer-fold selected alpha and PCA maps;
-- mean alpha and modal PCA maps;
-- Fisher-z null mean, null standard deviation, standardized effect,
-  empirical-p, and signed-z maps;
-- an NPZ containing observed/predicted time series and original BOLD row indices
-  for every outer fold;
-- JSON with configuration, run order, row counts, mask geometry, and output
-  paths.
-
-PCA value `0` means PCA was disabled. Categorical PCA summaries use the mode
-across outer folds with the smallest-value tie break.
+See [Encoding Output Reference](encoding_outputs.md) for exact definitions,
+units, dimensions, formulas, and interpretation of every map.
 
 ## Cluster Execution
 
@@ -297,6 +285,12 @@ label, such as array task `7` becoming `sub-007`. It is included at
 [`examples/encoding_subject_array.sbatch`](../examples/encoding_subject_array.sbatch).
 The wrapper intentionally leaves site-specific modules, environments, resource
 requests, and submission policy to the caller.
+
+Whole-subject jobs are suitable for small masks and no-permutation analyses.
+For large masks or permutation tests, use voxel chunks so work can run in
+parallel and stay within scheduler limits. The complete workflow is documented
+in [Chunked Encoding And Stitching](encoding_chunked.md), with array and stitch
+examples under `examples/`.
 
 ## Python API
 

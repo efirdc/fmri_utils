@@ -57,6 +57,9 @@ class SubjectData:
     reference_image: nib.spatialimages.SpatialImage
     voxel_indices: np.ndarray
     input_provenance: Optional[List[Dict[str, object]]] = None
+    total_voxels: Optional[int] = None
+    voxel_start: int = 0
+    voxel_stop: Optional[int] = None
 
 
 def _resolve_path(value: str, manifest_path: Path) -> Path:
@@ -126,10 +129,14 @@ def _same_grid(
     )
 
 
-def _build_common_mask(
+def load_subject_mask(
     specs: Sequence[RunSpec],
     config: EncodingConfig,
 ) -> Tuple[np.ndarray, nib.spatialimages.SpatialImage]:
+    """Load the full model mask and reference image without loading BOLD."""
+
+    if not specs:
+        raise ValueError("At least one run is required")
     mask_images = [nib.load(str(spec.mask_path)) for spec in specs]
     reference = mask_images[0]
     for image in mask_images[1:]:
@@ -192,6 +199,9 @@ def _select_nuisance(
 def load_subject_data(
     specs: Sequence[RunSpec],
     config: EncodingConfig,
+    *,
+    voxel_start: int = 0,
+    voxel_stop: Optional[int] = None,
 ) -> SubjectData:
     """Load aligned features, masked BOLD, and nuisance arrays for one subject."""
 
@@ -202,8 +212,17 @@ def load_subject_data(
     if len(subjects) != 1:
         raise ValueError("load_subject_data expects rows for exactly one subject")
 
-    common_mask, reference_image = _build_common_mask(specs, config)
-    voxel_indices = np.flatnonzero(common_mask.ravel(order="C"))
+    common_mask, reference_image = load_subject_mask(specs, config)
+    all_voxel_indices = np.flatnonzero(common_mask.ravel(order="C"))
+    stop = all_voxel_indices.size if voxel_stop is None else int(voxel_stop)
+    start = int(voxel_start)
+    if start < 0 or stop <= start or stop > all_voxel_indices.size:
+        raise ValueError(
+            "Invalid voxel range [{}, {}) for {} mask voxels".format(
+                start, stop, all_voxel_indices.size
+            )
+        )
+    voxel_indices = all_voxel_indices[start:stop]
     runs = []
     input_provenance = []
     for spec in specs:
@@ -216,7 +235,9 @@ def load_subject_data(
         bold_volume = np.asanyarray(bold_image.dataobj, dtype=np.float32)
         if bold_volume.ndim != 4:
             raise ValueError("BOLD image must be 4D: {}".format(spec.bold_path))
-        bold = bold_volume[common_mask, :].T
+        bold = bold_volume.reshape((-1, bold_volume.shape[-1]), order="C")[
+            voxel_indices
+        ].T
         features, feature_valid = load_feature_matrix(spec.features_path)
         nuisance = _select_nuisance(
             spec.confounds_path,
@@ -298,6 +319,9 @@ def load_subject_data(
         reference_image=reference_image,
         voxel_indices=voxel_indices,
         input_provenance=input_provenance,
+        total_voxels=int(all_voxel_indices.size),
+        voxel_start=start,
+        voxel_stop=stop,
     )
 
 

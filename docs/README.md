@@ -9,6 +9,8 @@
 - [Registration QC](registration_qc.md)
 - [Transformations](transformations.md)
 - [Voxelwise Encoding](encoding.md)
+- [Chunked Encoding And Stitching](encoding_chunked.md)
+- [Encoding Output Reference](encoding_outputs.md)
 
 ## Typical Paths
 
@@ -19,6 +21,8 @@
 5. Run manifest-driven registration QC: [Registration QC](registration_qc.md)
 6. Warp subject maps to MNI: [Transformations](transformations.md)
 7. Fit nested stimulus-to-BOLD models: [Voxelwise Encoding](encoding.md)
+8. Distribute permutation fits: [Chunked Encoding And Stitching](encoding_chunked.md)
+9. Interpret encoding maps: [Encoding Output Reference](encoding_outputs.md)
 
 ## Visual Examples
 

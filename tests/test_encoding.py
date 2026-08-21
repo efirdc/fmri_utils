@@ -19,7 +19,11 @@ from fmri_utils.encoding import (
     fit_encoding,
     load_run_manifest,
     load_subject_data,
+    make_chunk_manifest,
+    result_metric_arrays,
+    save_encoding_chunk,
     save_encoding_result,
+    stitch_encoding_chunks,
     write_run_manifest,
 )
 from fmri_utils.encoding.features import build_lagged_features, load_feature_matrix
@@ -135,6 +139,41 @@ class EncodingDataTests(unittest.TestCase):
                 subject.input_provenance[0]["preprocessing_source"], "custom_test"
             )
 
+    def test_loader_selects_a_stable_voxel_range(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rows = []
+            for run in range(1, 4):
+                bold = root / "run-{}_bold.nii.gz".format(run)
+                mask = root / "run-{}_mask.nii.gz".format(run)
+                features = root / "run-{}_features.npy".format(run)
+                values = np.arange(48, dtype=np.float32).reshape(4, 12)
+                _save_nifti(bold, values.reshape(4, 1, 1, 12))
+                _save_nifti(mask, np.ones((4, 1, 1), dtype=np.uint8))
+                np.save(features, np.arange(12, dtype=np.float32)[:, None])
+                rows.append(
+                    {
+                        "subject_id": "sub-001",
+                        "run_id": "run-{}".format(run),
+                        "bold_path": str(bold),
+                        "mask_path": str(mask),
+                        "features_path": str(features),
+                    }
+                )
+            manifest = write_run_manifest(rows, root / "runs.csv")
+            specs = load_run_manifest(manifest, "sub-001")
+            data = load_subject_data(
+                specs,
+                EncodingConfig(lags=(0,), ridge_alphas=(1.0,)),
+                voxel_start=1,
+                voxel_stop=3,
+            )
+            self.assertEqual(data.total_voxels, 4)
+            self.assertEqual(data.voxel_start, 1)
+            self.assertEqual(data.voxel_stop, 3)
+            np.testing.assert_array_equal(data.voxel_indices, [1, 2])
+            self.assertEqual(data.runs[0].bold.shape, (12, 2))
+
 
 class EncodingModelTests(unittest.TestCase):
     def _subject(self) -> SubjectData:
@@ -248,6 +287,122 @@ class EncodingModelTests(unittest.TestCase):
         result = fit_encoding(subject, config)
         self.assertEqual(result.outer_fold_correlation.shape, (4, 3))
         self.assertTrue(np.all(result.mean_correlation > 0.8))
+
+
+class EncodingChunkTests(unittest.TestCase):
+    def _dataset(self, root: Path) -> Path:
+        rng = np.random.default_rng(12)
+        weights = rng.normal(size=(3, 5)).astype(np.float32)
+        rows = []
+        for run in range(1, 4):
+            features_array = rng.normal(size=(24, 3)).astype(np.float32)
+            bold_array = features_array @ weights + rng.normal(
+                scale=0.05, size=(24, 5)
+            )
+            bold = root / "run-{}_bold.nii.gz".format(run)
+            mask = root / "run-{}_mask.nii.gz".format(run)
+            features = root / "run-{}_features.npy".format(run)
+            _save_nifti(
+                bold,
+                np.asarray(bold_array.T.reshape(5, 1, 1, 24), dtype=np.float32),
+            )
+            _save_nifti(mask, np.ones((5, 1, 1), dtype=np.uint8))
+            np.save(features, features_array)
+            rows.append(
+                {
+                    "subject_id": "sub-001",
+                    "run_id": "run-{}".format(run),
+                    "bold_path": str(bold),
+                    "mask_path": str(mask),
+                    "features_path": str(features),
+                }
+            )
+        return write_run_manifest(rows, root / "runs.csv")
+
+    def test_chunked_fit_matches_full_fit_and_stitches_traces(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = self._dataset(root)
+            config = EncodingConfig(
+                lags=(0,),
+                ridge_alphas=(0.1, 1.0),
+                n_permutations=2,
+                permutation_block_length=4,
+                random_seed=17,
+            )
+            specs = load_run_manifest(manifest, "sub-001")
+            full_data = load_subject_data(specs, config)
+            full_result = fit_encoding(full_data, config)
+
+            chunk_manifest = root / "chunks.csv"
+            rows = make_chunk_manifest(manifest, chunk_manifest, chunk_size=2)
+            self.assertEqual(len(rows), 3)
+            output_root = root / "results"
+            for row in rows:
+                chunk_data = load_subject_data(
+                    specs,
+                    config,
+                    voxel_start=int(row["voxel_start"]),
+                    voxel_stop=int(row["voxel_stop"]),
+                )
+                chunk_result = fit_encoding(chunk_data, config)
+                save_encoding_chunk(
+                    chunk_result,
+                    chunk_data,
+                    output_root / row["chunk_relpath"],
+                    save_traces=True,
+                )
+
+            outputs = stitch_encoding_chunks(chunk_manifest, output_root)["sub-001"]
+            for metric, expected in result_metric_arrays(full_result).items():
+                image = nib.load(outputs[metric])
+                actual = np.asanyarray(image.dataobj)
+                if expected.ndim == 1:
+                    actual = actual.reshape(-1)
+                else:
+                    actual = actual.reshape((-1, expected.shape[0])).T
+                np.testing.assert_allclose(actual, expected, rtol=1.0e-4, atol=1.0e-5)
+            with np.load(outputs["outer_fold_traces"], allow_pickle=False) as traces:
+                np.testing.assert_allclose(
+                    traces["predicted_00"], full_result.predicted_by_fold[0], atol=1.0e-5
+                )
+
+    def test_stitch_rejects_a_missing_chunk(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = self._dataset(root)
+            chunk_manifest = root / "chunks.csv"
+            make_chunk_manifest(manifest, chunk_manifest, chunk_size=2)
+            with self.assertRaisesRegex(FileNotFoundError, "Missing encoding chunk"):
+                stitch_encoding_chunks(chunk_manifest, root / "results")
+
+    def test_stitch_rejects_mixed_scientific_settings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = self._dataset(root)
+            chunk_manifest = root / "chunks.csv"
+            rows = make_chunk_manifest(manifest, chunk_manifest, chunk_size=2)
+            specs = load_run_manifest(manifest, "sub-001")
+            output_root = root / "results"
+            for index, row in enumerate(rows):
+                config = EncodingConfig(
+                    lags=(0,),
+                    ridge_alphas=(1.0 if index < 2 else 10.0,),
+                )
+                data = load_subject_data(
+                    specs,
+                    config,
+                    voxel_start=int(row["voxel_start"]),
+                    voxel_stop=int(row["voxel_stop"]),
+                )
+                save_encoding_chunk(
+                    fit_encoding(data, config),
+                    data,
+                    output_root / row["chunk_relpath"],
+                )
+            with self.assertRaisesRegex(ValueError, "different inputs or settings"):
+                stitch_encoding_chunks(chunk_manifest, output_root)
+
 
 
 if __name__ == "__main__":

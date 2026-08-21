@@ -35,6 +35,8 @@ Direct links:
 - [Registration QC](docs/registration_qc.md)
 - [Transformations](docs/transformations.md)
 - [Voxelwise Encoding](docs/encoding.md)
+- [Chunked Encoding And Stitching](docs/encoding_chunked.md)
+- [Encoding Output Reference](docs/encoding_outputs.md)
 
 ## Example Outputs
 
