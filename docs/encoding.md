@@ -291,8 +291,9 @@ across outer folds with the smallest-value tie break.
 
 ## Cluster Execution
 
-The CLI fits one subject at a time, so a scheduler array can select a subject
-from a plain-text file. A minimal SLURM wrapper is included at
+The CLI fits one subject at a time. The example SLURM wrapper sets the array
+range to the numeric subject IDs and formats each task ID as a BIDS subject
+label, such as array task `7` becoming `sub-007`. It is included at
 [`examples/encoding_subject_array.sbatch`](../examples/encoding_subject_array.sbatch).
 The wrapper intentionally leaves site-specific modules, environments, resource
 requests, and submission policy to the caller.

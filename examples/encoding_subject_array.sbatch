@@ -3,18 +3,15 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=16G
 #SBATCH --time=02:00:00
+# Subject labels sub-001 through sub-020.
+#SBATCH --array=1-20
 
 set -euo pipefail
 
 : "${MANIFEST:?Set MANIFEST to the generic run-manifest CSV}"
-: "${SUBJECTS_FILE:?Set SUBJECTS_FILE to one subject ID per line}"
 : "${OUTPUT_ROOT:?Set OUTPUT_ROOT to the result directory}"
 
-subject_id=$(sed -n "$((SLURM_ARRAY_TASK_ID + 1))p" "$SUBJECTS_FILE")
-if [[ -z "$subject_id" ]]; then
-  echo "No subject for array index ${SLURM_ARRAY_TASK_ID}" >&2
-  exit 2
-fi
+subject_id=$(printf "sub-%03d" "$SLURM_ARRAY_TASK_ID")
 
 srun --cpu-bind=cores --hint=nomultithread fmri-encoding fit \
   --manifest "$MANIFEST" \
