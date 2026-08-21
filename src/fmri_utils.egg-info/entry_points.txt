@@ -1,4 +1,5 @@
 [console_scripts]
+fmri-encoding = fmri_utils.encoding.cli:main
 fmri-registration-qc = fmri_utils.registration_qc:main
 fmri-registration-qc-manifest = fmri_utils.registration_qc_manifest:main
 fmri-utils = fmri_utils.second_level_analysis:main

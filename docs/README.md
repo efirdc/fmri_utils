@@ -8,6 +8,7 @@
 - [Montage API](montage_api.md)
 - [Registration QC](registration_qc.md)
 - [Transformations](transformations.md)
+- [Voxelwise Encoding](encoding.md)
 
 ## Typical Paths
 
@@ -17,6 +18,7 @@
 4. Render subject montage grids: [Montage API](montage_api.md)
 5. Run manifest-driven registration QC: [Registration QC](registration_qc.md)
 6. Warp subject maps to MNI: [Transformations](transformations.md)
+7. Fit nested stimulus-to-BOLD models: [Voxelwise Encoding](encoding.md)
 
 ## Visual Examples
 

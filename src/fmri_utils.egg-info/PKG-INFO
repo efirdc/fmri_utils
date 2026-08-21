@@ -1,7 +1,7 @@
 Metadata-Version: 2.4
 Name: fmri-utils
-Version: 0.3.0
-Summary: Reusable fMRI utilities for group analysis, registration QC, montages, transforms, and decoding.
+Version: 0.4.0
+Summary: Reusable fMRI utilities for encoding, group analysis, registration QC, montages, transforms, and decoding.
 Classifier: Programming Language :: Python :: 3
 Classifier: Programming Language :: Python :: 3 :: Only
 Classifier: Programming Language :: Python :: 3.9
@@ -25,6 +25,7 @@ Requires-Dist: Pillow
 # fmri_utils
 
 Reusable fMRI utilities for:
+- voxelwise stimulus-to-BOLD encoding analysis
 - second-level group analysis
 - fMRIPrep-based transforms
 - montage rendering
@@ -57,6 +58,7 @@ Direct links:
 - [Montage API](docs/montage_api.md)
 - [Registration QC](docs/registration_qc.md)
 - [Transformations](docs/transformations.md)
+- [Voxelwise Encoding](docs/encoding.md)
 
 ## Example Outputs
 

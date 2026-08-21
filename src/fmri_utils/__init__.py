@@ -24,6 +24,21 @@ from .registration_qc import (
     run_registration_qc,
 )
 from .transformations import warp_to_mni_with_fmriprep_transform
+from .encoding import (
+    EncodingConfig,
+    EncodingResult,
+    CVPlan,
+    InnerFold,
+    OuterFold,
+    build_cv_plan,
+    validate_cv_plan,
+    discover_fmriprep_runs,
+    fit_encoding,
+    fmriprep_nuisance_columns,
+    load_run_manifest,
+    load_subject_data,
+    save_encoding_result,
+)
 
 __all__ = [
     "SecondLevelOutputs",
@@ -38,4 +53,17 @@ __all__ = [
     "RegistrationQcRow",
     "run_registration_qc",
     "warp_to_mni_with_fmriprep_transform",
+    "EncodingConfig",
+    "EncodingResult",
+    "CVPlan",
+    "InnerFold",
+    "OuterFold",
+    "build_cv_plan",
+    "validate_cv_plan",
+    "discover_fmriprep_runs",
+    "fit_encoding",
+    "fmriprep_nuisance_columns",
+    "load_run_manifest",
+    "load_subject_data",
+    "save_encoding_result",
 ]

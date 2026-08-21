@@ -15,6 +15,16 @@ src/fmri_utils.egg-info/dependency_links.txt
 src/fmri_utils.egg-info/entry_points.txt
 src/fmri_utils.egg-info/requires.txt
 src/fmri_utils.egg-info/top_level.txt
+src/fmri_utils/encoding/__init__.py
+src/fmri_utils/encoding/cli.py
+src/fmri_utils/encoding/config.py
+src/fmri_utils/encoding/data.py
+src/fmri_utils/encoding/features.py
+src/fmri_utils/encoding/model.py
+src/fmri_utils/encoding/outputs.py
+src/fmri_utils/encoding/preprocessing.py
+src/fmri_utils/encoding/splits.py
+tests/test_encoding.py
 tests/test_montage.py
 tests/test_registration_qc.py
 tests/test_registration_qc_manifest.py

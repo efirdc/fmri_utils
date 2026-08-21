@@ -1,6 +1,7 @@
 # fmri_utils
 
 Reusable fMRI utilities for:
+- voxelwise stimulus-to-BOLD encoding analysis
 - second-level group analysis
 - fMRIPrep-based transforms
 - montage rendering
@@ -33,6 +34,7 @@ Direct links:
 - [Montage API](docs/montage_api.md)
 - [Registration QC](docs/registration_qc.md)
 - [Transformations](docs/transformations.md)
+- [Voxelwise Encoding](docs/encoding.md)
 
 ## Example Outputs
 
