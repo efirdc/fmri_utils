@@ -11,6 +11,7 @@
 - [Voxelwise Encoding](encoding.md)
 - [Chunked Encoding And Stitching](encoding_chunked.md)
 - [Encoding Output Reference](encoding_outputs.md)
+- [Story Ratings](story_ratings.md)
 
 ## Typical Paths
 
@@ -23,6 +24,7 @@
 7. Fit nested stimulus-to-BOLD models: [Voxelwise Encoding](encoding.md)
 8. Distribute permutation fits: [Chunked Encoding And Stitching](encoding_chunked.md)
 9. Interpret encoding maps: [Encoding Output Reference](encoding_outputs.md)
+10. Rate story segments with an LLM and build regressors: [Story Ratings](story_ratings.md)
 
 ## Visual Examples
 
