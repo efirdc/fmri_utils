@@ -12,6 +12,7 @@
 - [Chunked Encoding And Stitching](encoding_chunked.md)
 - [Encoding Output Reference](encoding_outputs.md)
 - [Story Ratings](story_ratings.md)
+- [Result Viewer](viewer.md)
 
 ## Typical Paths
 

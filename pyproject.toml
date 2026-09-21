@@ -39,9 +39,14 @@ fmri-registration-qc = "fmri_utils.registration_qc:main"
 fmri-registration-qc-manifest = "fmri_utils.registration_qc_manifest:main"
 fmri-encoding = "fmri_utils.encoding.cli:main"
 fmri-story-ratings = "fmri_utils.story_ratings.cli:main"
+fmri-viewer = "fmri_utils.viewer.cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
+include-package-data = true
+
+[tool.setuptools.package-data]
+"fmri_utils.viewer" = ["resources/*.html"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

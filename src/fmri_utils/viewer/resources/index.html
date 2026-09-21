@@ -1,0 +1,4042 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Result Browser</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+  :root {
+    --ground: #0B0F14; --panel: #131A21; --panel-2: #1A232C;
+    --ink: #DDE5ED; --ink-muted: #8697A7; --line: #26313B;
+    --accent: #4FA8D8; --accent-ink: #0B0F14; --warn: #E8913C;
+  }
+  /* Dark by default regardless of the OS setting; an explicit light choice
+     still wins. */
+  :root[data-theme="light"] {
+    --ground: #EFF2F5; --panel: #FFFFFF; --panel-2: #E7ECF1;
+    --ink: #101820; --ink-muted: #5A6B7B; --line: #D3DBE3;
+    --accent: #1C6C97; --accent-ink: #FFFFFF; --warn: #B8621B;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  /* The viewer is a fixed frame, not a document: the toolbar and the status
+     bar keep their size and the stage takes whatever is left, so a short
+     window never grows a scrollbar that hides the controls or the readout. */
+  body { overflow: hidden; }
+  body {
+    margin: 0; background: var(--ground); color: var(--ink);
+    font-family: Archivo, system-ui, -apple-system, "Segoe UI", sans-serif;
+    font-size: 14px; line-height: 1.5; -webkit-font-smoothing: antialiased;
+  }
+  h1 { margin: 0; font-size: 17px; font-weight: 600; letter-spacing: -0.01em; }
+  .shell { display: grid; grid-template-columns: 262px 1fr; height: 100%; }
+  @media (max-width: 960px) {
+    .shell { grid-template-columns: 1fr; height: auto; }
+    /* Stacked, the rail's prose would push the brain below the fold, so on a
+       phone the viewer comes first and the reading matter follows it. */
+    .shell > .main { order: 1; }
+    .shell > .rail { order: 2; border-right: 0; border-top: 1px solid var(--line); }
+  }
+  /* Dragging on a canvas rotates or pans the scene; letting the browser treat
+     it as a page scroll or a page pinch instead makes the viewer unusable on
+     a touch screen. */
+  canvas { touch-action: none; }
+
+  .rail {
+    background: var(--panel); border-right: 1px solid var(--line);
+    padding: 20px 18px 24px; overflow-y: auto;
+    display: flex; flex-direction: column; gap: 20px;
+  }
+  .kicker {
+    font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 10px;
+    letter-spacing: 0.16em; text-transform: uppercase; color: var(--accent);
+  }
+  .rail p.lede { margin: 4px 0 0; color: var(--ink-muted); font-size: 12.5px; }
+  .group { display: flex; flex-direction: column; gap: 8px; }
+  .group > .label, .field > .label {
+    font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 10px;
+    letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-muted);
+  }
+  .stack { display: flex; flex-direction: column; gap: 4px; }
+  .item {
+    text-align: left; width: 100%; cursor: pointer; background: transparent;
+    color: var(--ink); font: inherit; border: 1px solid transparent;
+    border-radius: 7px; padding: 8px 10px; display: flex; flex-direction: column; gap: 2px;
+  }
+  .item:hover { background: var(--panel-2); }
+  .item[aria-pressed="true"] { background: var(--panel-2); border-color: var(--accent); }
+  .item .sub { font-size: 11.5px; color: var(--ink-muted); }
+  .blurb { font-size: 12.5px; color: var(--ink-muted); border-left: 2px solid var(--line); padding-left: 10px; margin: 0; }
+  .badge {
+    align-self: flex-start; font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase;
+    border: 1px solid var(--line); border-radius: 999px; padding: 2px 8px; color: var(--ink-muted);
+  }
+  .badge.affine { color: var(--warn); border-color: var(--warn); }
+  .foot { margin-top: auto; font-size: 11.5px; color: var(--ink-muted); }
+  .roi-list {
+    max-height: 190px; overflow-y: auto; display: flex; flex-direction: column; gap: 1px;
+    border: 1px solid var(--line); border-radius: 7px; padding: 4px;
+  }
+  .roi-list label {
+    display: flex; gap: 7px; align-items: center; font-size: 12px;
+    padding: 2px 4px; border-radius: 4px; cursor: pointer;
+  }
+  .roi-list label:hover { background: var(--panel-2); }
+  .roi-list input { accent-color: var(--accent); }
+  .roi-swatch { width: 9px; height: 9px; border-radius: 2px; flex: none; }
+  #roi-filter {
+    font: inherit; font-size: 12px; padding: 5px 8px; border-radius: 6px;
+    border: 1px solid var(--line); background: var(--panel-2); color: var(--ink);
+  }
+
+  .main {
+    display: flex; flex-direction: column; min-width: 0; min-height: 0;
+    height: 100%; overflow: hidden;
+  }
+  /* The toolbar wraps, and on a short window it can want more room than there
+     is; let it scroll rather than push the stage off the bottom. */
+  .bar { flex: 0 0 auto; max-height: 45vh; overflow-y: auto; }
+  .status { flex: 0 0 auto; }
+  @media (max-width: 960px) {
+    /* Stacked on a phone the page does scroll, and should. */
+    .main { height: auto; overflow: visible; }
+    .bar { max-height: none; overflow: visible; }
+  }
+  @media (max-width: 960px) { body { overflow: auto; } }
+  .bar {
+    display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center;
+    padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--panel);
+  }
+  .field { display: flex; align-items: center; gap: 7px; }
+  .seg { display: flex; background: var(--panel-2); border-radius: 7px; padding: 2px; gap: 2px; flex-wrap: wrap; }
+  .seg button {
+    font: inherit; font-size: 12.5px; cursor: pointer; color: var(--ink-muted);
+    background: transparent; border: 0; border-radius: 5px; padding: 4px 9px;
+  }
+  .seg button[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); }
+  .seg button:disabled { opacity: 0.35; cursor: not-allowed; }
+  input[type="range"] { width: 120px; accent-color: var(--accent); }
+  input[type="number"] {
+    font: inherit; font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 12px;
+    width: 11ch; padding: 4px 7px; border-radius: 6px; border: 1px solid var(--line);
+    background: var(--panel-2); color: var(--ink);
+  }
+  button.ghost {
+    font: inherit; font-size: 12px; cursor: pointer; color: var(--ink-muted);
+    background: transparent; border: 1px solid var(--line); border-radius: 6px; padding: 3px 8px;
+  }
+  button.ghost:hover { color: var(--ink); }
+  .hint {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 13px; height: 13px; margin-left: 5px; border-radius: 50%;
+    border: 1px solid var(--line); color: var(--ink-muted);
+    font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 9px;
+    line-height: 1; cursor: help; position: relative; text-transform: none;
+    letter-spacing: 0;
+  }
+  .hint:hover, .hint:focus-visible { color: var(--ink); border-color: var(--accent); }
+  .hint::after {
+    content: attr(data-tip); position: absolute; left: 50%; bottom: 150%;
+    transform: translateX(-50%); width: max-content; max-width: 240px;
+    padding: 6px 8px; border-radius: 5px; background: #0C1218;
+    border: 1px solid var(--line); color: var(--ink); font-size: 11px;
+    font-family: inherit; text-align: left; line-height: 1.35;
+    opacity: 0; visibility: hidden; transition: opacity 120ms ease;
+    pointer-events: none; z-index: 20;
+  }
+  .hint:hover::after, .hint:focus-visible::after { opacity: 1; visibility: visible; }
+  .dual { position: relative; width: 190px; height: 22px; flex: none; }
+  .dual-track, .dual-fill {
+    position: absolute; top: 9px; height: 4px; border-radius: 2px;
+  }
+  .dual-track { left: 0; right: 0; background: var(--panel-2); border: 1px solid var(--line); }
+  .dual-fill { background: var(--accent); opacity: 0.75; }
+  .dual-knob {
+    position: absolute; top: 3px; width: 15px; height: 15px; margin-left: -7px;
+    border-radius: 50%; background: var(--ink); border: 2px solid var(--accent);
+    cursor: grab; touch-action: none;
+  }
+  .dual-knob:active { cursor: grabbing; }
+  .dual-knob[aria-disabled="true"] { opacity: 0.4; cursor: not-allowed; border-color: var(--line); }
+  .value {
+    font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 12px;
+    color: var(--ink); font-variant-numeric: tabular-nums; min-width: 4.2em;
+  }
+  /* min-height: 0 lets the stage give way when the window is short, which is
+     what stops the whole page from growing a scrollbar and pushing the status
+     bar out of sight. */
+  .stage { position: relative; flex: 1; min-height: 0; background: #05080B; }
+  /* Region outlines and their labels are drawn over the scene rather than
+     into it, so they stay crisp lines at any zoom and never mix with the
+     statistical colours the way painted vertices did. */
+  #annotations { position: absolute; inset: 0; pointer-events: none; z-index: 3; }
+  /* The surface has its own WebGL context: NiiVue's mesh pipeline carries no
+     texture coordinates, and region outlines drawn any other way are stuck at
+     the resolution of the mesh. */
+  #surface-gl { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 2; }
+  @media (max-width: 960px) { .stage { height: 60vh; min-height: 260px; } }
+  #gl { width: 100%; height: 100%; display: block; }
+  .montage {
+    position: absolute; inset: 0; display: grid; gap: 6px; padding: 8px;
+    grid-template-columns: repeat(4, 1fr); grid-auto-rows: 1fr;
+    background: #05080B; z-index: 2;
+  }
+  @media (max-width: 760px) { .montage { grid-template-columns: repeat(2, 1fr); } }
+  .cell { position: relative; background: #05080B; border: 1px solid var(--line); border-radius: 5px; overflow: hidden; min-height: 0; }
+  .cell canvas { width: 100%; height: 100%; display: block; }
+  .cell .tag {
+    position: absolute; left: 6px; top: 5px; font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 11px; color: #DDE5ED; background: rgba(5,8,11,0.6); padding: 1px 6px; border-radius: 4px;
+  }
+  .loading {
+    position: absolute; inset: 0; display: grid; place-items: center; z-index: 5;
+    background: rgba(5, 8, 11, 0.72); color: #DDE5ED;
+    font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 12px; text-align: center; padding: 20px;
+  }
+  .status {
+    display: flex; flex-wrap: wrap; gap: 8px 20px; align-items: center;
+    padding: 9px 16px; border-top: 1px solid var(--line); background: var(--panel);
+    font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 12px;
+    color: var(--ink-muted); font-variant-numeric: tabular-nums;
+  }
+  .status strong { color: var(--ink); font-weight: 500; }
+  .scale { display: flex; align-items: center; gap: 7px; }
+  #colorbar { width: 420px; max-width: 100%; height: 34px; }
+  [hidden] { display: none !important; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+</style>
+</head>
+<body>
+<div class="shell">
+  <aside class="rail">
+    <div>
+      <span class="kicker" id="kicker"></span>
+      <h1 id="title">Result Browser</h1>
+      <p class="lede" id="lede"></p>
+    </div>
+    <div class="group"><span class="label">Report</span><div class="stack" id="reports"></div></div>
+    <div class="group"><span class="label">Endpoint</span><div class="stack" id="endpoints"></div></div>
+    <p class="blurb" id="blurb"></p>
+    <div class="group">
+      <span class="label">Regions</span>
+      <div class="seg" id="atlas-choice"></div>
+      <input type="search" id="roi-filter" placeholder="filter regions">
+      <div class="roi-list" id="roi-list"></div>
+      <button type="button" class="ghost" id="roi-all">select all</button>
+      <button type="button" class="ghost" id="roi-clear">clear regions</button>
+    </div>
+    <span class="badge" id="warp-badge"></span>
+    <div class="foot" id="footnote"></div>
+  </aside>
+
+  <main class="main">
+    <div class="bar">
+      <div class="field" id="feature-field">
+        <span class="label">Features</span><div class="seg" id="features"></div>
+      </div>
+      <div class="field" id="subject-field">
+        <span class="label">Subject</span><div class="seg" id="subjects"></div>
+      </div>
+      <div class="field" id="space-field">
+        <span class="label">Space</span>
+        <div class="seg" id="spaces">
+          <button type="button" data-space="mni" aria-pressed="true">MNI</button>
+          <button type="button" data-space="subject">subject T1</button>
+        </div>
+      </div>
+      <div class="field" id="surface-space-field" hidden>
+        <span class="label">Space</span>
+        <div class="seg" id="surface-spaces">
+          <button type="button" data-surface-space="fsnative" aria-pressed="true">fsnative</button>
+          <button type="button" data-surface-space="fsaverage">fsaverage</button>
+        </div>
+      </div>
+      <div class="field">
+        <span class="label">Mode</span>
+        <div class="seg" id="modes">
+          <button type="button" data-mode-kind="volume" aria-pressed="true">volume</button>
+          <button type="button" data-mode-kind="surface">surface</button>
+        </div>
+      </div>
+      <div class="field" id="view-field">
+        <span class="label">View</span>
+        <div class="seg" id="views">
+          <button type="button" data-view="multi" aria-pressed="true">multi</button>
+          <button type="button" data-view="axial">axial</button>
+          <button type="button" data-view="coronal">coronal</button>
+          <button type="button" data-view="sagittal">sagittal</button>
+          <button type="button" data-view="render">3D</button>
+          <button type="button" data-view="montage">montage</button>
+        </div>
+      </div>
+      <div class="field" id="threshold-mode-field">
+        <span class="label">Threshold by</span>
+        <div class="seg" id="threshold-modes">
+          <button type="button" data-mode="value" aria-pressed="true">value</button>
+          <button type="button" data-mode="p">p &lt;</button>
+          <button type="button" data-mode="q">FDR q &lt;</button>
+        </div>
+      </div>
+      <div class="field">
+        <span class="label">Window</span>
+        <div class="dual" id="dual">
+          <div class="dual-track"></div>
+          <div class="dual-fill" id="dual-fill"></div>
+          <div class="dual-knob" id="knob-min" tabindex="0" role="slider" aria-label="threshold"></div>
+          <div class="dual-knob" id="knob-max" tabindex="0" role="slider" aria-label="window maximum"></div>
+        </div>
+        <input type="number" id="threshold-input" step="any" min="0" value="0" title="threshold">
+        <input type="number" id="window-max" step="any" min="0" value="1" title="window maximum">
+        <button type="button" class="ghost" id="window-reset">reset</button>
+        <span class="value" id="threshold-value">—</span>
+      </div>
+      <div class="field">
+        <span class="label">Blend</span>
+        <div class="seg" id="blends">
+          <button type="button" data-blend="soft" aria-pressed="true">fade below</button>
+          <button type="button" data-blend="hard">clip below</button>
+        </div>
+      </div>
+      <div class="field" id="opacity-field">
+        <span class="label">Overlay<span class="hint" tabindex="0"
+          data-tip="Opacity of the statistical map. Press A to blink it off and back, to see the anatomy underneath.">i</span></span>
+        <input type="range" id="opacity" min="0" max="100" value="90" step="1"
+               title="overlay opacity — press A to blink it off and back">
+      </div>
+      <div class="field" id="roi-opacity-field">
+        <span class="label">Regions<span class="hint" tabindex="0"
+          data-tip="Opacity of the selected atlas regions. Press S to blink them off and back.">i</span></span>
+        <input type="range" id="roi-opacity" min="0" max="100" value="90" step="1"
+               title="region opacity — press S to blink regions off and back">
+      </div>
+      <div class="field" id="surface-field" hidden>
+        <span class="label">Geometry</span>
+        <div class="seg" id="geometries">
+          <button type="button" data-geometry="wm">white</button>
+          <button type="button" data-geometry="pia">pial</button>
+          <button type="button" data-geometry="inflated" aria-pressed="true">inflated</button>
+          <button type="button" data-geometry="flat">flat</button>
+        </div>
+        <div class="seg" id="hemispheres">
+          <button type="button" data-hemi="lh" aria-pressed="true">left</button>
+          <button type="button" data-hemi="rh" aria-pressed="true">right</button>
+        </div>
+      </div>
+      <div class="field" id="morph-field" hidden>
+        <span class="label">Unfold</span>
+        <input type="range" id="morph" min="0" max="300" value="200" step="1"
+               title="white → pial → inflated → flat">
+        <span class="value" id="morph-value">inflated</span>
+      </div>
+      <div class="field" id="separation-field" hidden>
+        <span class="label">Open</span>
+        <input type="range" id="separation" min="0" max="100" value="0" step="1"
+               title="swing the hemispheres outward, as a flat map has them">
+      </div>
+      <div class="field" id="outline-width-field" hidden>
+        <span class="label">Outline width</span>
+        <input type="range" id="outline-width" min="0.3" max="3" value="1" step="0.1"
+               title="width of the region outlines, in millimetres of cortex">
+      </div>
+      <div class="field" id="curvature-field" hidden>
+        <span class="label">Curvature</span>
+        <input type="range" id="curvature" min="0" max="100" value="100" step="1"
+               title="how strongly the folding is shaded">
+      </div>
+      <div class="field" id="montage-page-field" hidden>
+        <span class="label">Subjects</span>
+        <button type="button" class="ghost" id="montage-prev">‹</button>
+        <span class="value" id="montage-page-value">—</span>
+        <button type="button" class="ghost" id="montage-next">›</button>
+      </div>
+      <div class="field" id="montage-slice-field" hidden>
+        <span class="label">Slice</span>
+        <input type="range" id="montage-slice" min="5" max="95" value="52" step="1">
+        <span class="value" id="montage-slice-value">—</span>
+      </div>
+    </div>
+
+    <div class="stage">
+      <canvas id="gl"></canvas>
+      <canvas id="surface-gl" hidden></canvas>
+      <canvas id="annotations"></canvas>
+      <div class="montage" id="montage" hidden></div>
+      <div class="loading" id="loading">loading…</div>
+    </div>
+
+    <div class="status">
+      <span id="selection">—</span>
+      <canvas id="colorbar" width="420" height="34" aria-label="colour scale"></canvas>
+      <span>voxel <strong id="coords">—</strong></span>
+      <span>value <strong id="voxel-value">—</strong></span>
+      <span id="roi-readout"></span>
+      <span id="diagnostic" hidden></span>
+    </div>
+  </main>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@niivue/niivue@0.69.0/dist/niivue.umd.js"></script>
+<script>
+(function () {
+  "use strict";
+  var Niivue = window.niivue.Niivue;
+  var NVImage = window.niivue.NVImage;
+
+  var DRAG_ENUM = window.niivue.DRAG_MODE || {};
+  var DRAG = {
+    none: DRAG_ENUM.none !== undefined ? DRAG_ENUM.none : 0,
+    pan: DRAG_ENUM.pan !== undefined ? DRAG_ENUM.pan : 3
+  };
+
+  // Both ramps start at white so the two tails meet smoothly at zero instead
+  // of butting against each other with a visible seam.
+  var POS_STOPS = [[255, 255, 255], [252, 190, 92], [214, 66, 24], [130, 12, 10]];
+  var NEG_STOPS = [[255, 255, 255], [128, 186, 236], [34, 106, 196], [12, 38, 120]];
+
+  var state = {
+    manifest: null, report: null, endpoint: null, feature: null, subject: null,
+    view: "multi", blend: "soft", thresholdMode: "value", space: "mni",
+    geometry: "inflated", hemispheres: { lh: true, rh: true },
+    atlas: null, regions: {}, mode: "volume", surfaceSpace: "fsnative",
+    montagePage: 0,
+    morph: 2, split: 0, curvature: 1, surfaceRegions: {},
+    surfaceZoom: 1, surfacePan: [0, 0], azimuth: 110, elevation: 10,
+    // Width in millimetres on the surface, not pixels on the screen, because
+    // the line is drawn on the sheet and keeps its width as you zoom.
+    outlineWidth: 1, outlineOpacity: 0.9,
+  };
+  var loadedTemplate = null;
+  var nv = null, montageViews = [], loadToken = 0;
+
+  var el = {};
+  ["reports", "endpoints", "blurb", "warp-badge", "features", "feature-field", "subjects",
+   "subject-field", "views", "threshold-modes", "threshold", "threshold-value", "blends",
+   "opacity", "interp", "montage", "montage-slice", "montage-slice-value",
+   "montage-slice-field", "montage-page-field", "montage-page-value",
+   "montage-prev", "montage-next", "loading", "selection",
+   "coords", "voxel-value", "spaces", "threshold-input", "window-max",
+   "window-reset", "threshold-mode-field", "diagnostic",
+   "dual", "dual-fill", "knob-min", "knob-max", "colorbar", "geometries",
+   "hemispheres", "surface-field", "atlas-choice", "roi-filter", "roi-list",
+   "roi-clear", "roi-all", "modes", "view-field", "roi-opacity", "roi-opacity-field",
+   "opacity-field", "roi-readout", "space-field", "surface-space-field",
+   "kicker", "title", "lede", "footnote",
+   "annotations", "surface-gl", "surface-spaces", "morph", "morph-value", "morph-field", "separation",
+   "separation-field", "curvature", "curvature-field", "outline-width",
+   "outline-width-field"].forEach(function (id) {
+    el[id] = document.getElementById(id);
+  });
+
+  function format(v) {
+    var m = Math.abs(v);
+    if (m === 0) return "0";
+    if (m >= 1000 || m < 0.0005) return v.toExponential(1);
+    if (m >= 10) return v.toFixed(1);
+    if (m >= 1) return v.toFixed(2);
+    return v.toFixed(4);
+  }
+
+  function mix(stops, t) {
+    var span = stops.length - 1;
+    var scaled = Math.min(Math.max(t, 0), 1) * span;
+    var i = Math.min(Math.floor(scaled), span - 1);
+    var f = scaled - i;
+    return [0, 1, 2].map(function (c) {
+      return Math.round(stops[i][c] + (stops[i + 1][c] - stops[i][c]) * f);
+    });
+  }
+
+  // Alpha lives in the colormap, which is what lets the overlay fade in at the
+  // threshold instead of appearing with a hard edge.
+  function alphaFor(t, blend) {
+    if (t <= 0) return 0;
+    if (blend === "solid") return 255;
+    var knee = 0.28;
+    return t >= knee ? 255 : Math.round(255 * (t / knee));
+  }
+
+  function buildColormap(stops, blend) {
+    var R = [], G = [], B = [], A = [], I = [];
+    for (var i = 0; i < 256; i += 1) {
+      var t = i / 255;
+      var c = mix(stops, t);
+      R.push(c[0]); G.push(c[1]); B.push(c[2]);
+      A.push(alphaFor(t, blend));
+      I.push(i);
+    }
+    return { R: R, G: G, B: B, A: A, I: I };
+  }
+
+  // Read out of NiiVue's own shaders rather than guessed from the enum names,
+  // because the volume path and the mesh path disagree about which number
+  // means what.
+  //
+  // Volume (orient shader): colormapType 0 scales the ramp from cal_min, so
+  // pure white slides up to the threshold and every colour above it rescales
+  // as you drag -- the same value changes colour. Types 1 and 2 both set the
+  // ramp's floor to zero, keeping white at zero; 1 then fades below threshold
+  // (alpha *= (f/cal_min)^2) and 2 clips it (alpha *= 0).
+  //
+  // Mesh (blendColormap): the same zero-based ramp for anything but type 0,
+  // but there 2 is the one that fades and 1 clips. So the two paths need
+  // opposite numbers for the same visible behaviour.
+  var BLEND_SETTINGS = {
+    soft: { volume: 1, mesh: 2 },
+    hard: { volume: 2, mesh: 1 }
+  };
+
+  function blendFor(target) {
+    return (BLEND_SETTINGS[state.blend] || BLEND_SETTINGS.soft)[target];
+  }
+
+  // The mask holds values 1..N, and NiiVue stretches a colormap across
+  // cal_min..cal_max, so the ramp is rebuilt for the current selection size.
+  // Otherwise region 1 lands at the very bottom of a 256-entry ramp and comes
+  // out a washed-out blend rather than its swatch colour.
+  function registerRegionColormap(instance, count) {
+    var R = [], G = [], B = [], A = [], I = [];
+    var total = Math.max(count || 1, 1);
+    for (var j = 0; j < 256; j += 1) {
+      var region = Math.min(Math.floor((j / 255) * total), total - 1);
+      var colour = ROI_COLOURS[region % ROI_COLOURS.length];
+      R.push(colour[0]); G.push(colour[1]); B.push(colour[2]);
+      // Everything outside a selected region clamps to entry 0, so that entry
+      // has to be fully transparent or the whole background takes the first
+      // region's colour.
+      A.push(j === 0 ? 0 : 255);
+      I.push(j);
+    }
+    instance.addColormap("roi", { R: R, G: G, B: B, A: A, I: I });
+  }
+
+  function registerColormaps(instance) {
+    instance.addColormap("tompos", buildColormap(POS_STOPS, "solid"));
+    instance.addColormap("tomneg", buildColormap(NEG_STOPS, "solid"));
+  }
+
+  // The bar shows what the render actually does: a transparent band either
+  // side of zero up to the threshold, then the ramp out to the window maximum,
+  // with the tick labels reading real map values.
+  function drawColorbar(floor, high) {
+    var canvas = el.colorbar;
+    if (!canvas) return;
+    var ratio = window.devicePixelRatio || 1;
+    var width = canvas.clientWidth || 420;
+    var height = 34;
+    canvas.width = width * ratio;
+    canvas.height = height * ratio;
+    var ctx = canvas.getContext("2d");
+    ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+    ctx.clearRect(0, 0, width, height);
+    var barHeight = 12;
+    var style = getComputedStyle(document.body);
+    var ink = style.getPropertyValue("--ink-muted").trim() || "#8697A7";
+    var faded = state.blend === "soft";
+    for (var x = 0; x < width; x += 1) {
+      var value = (x / (width - 1)) * 2 * high - high;
+      var magnitude = Math.abs(value);
+      var stops = value >= 0 ? POS_STOPS : NEG_STOPS;
+      var alpha;
+      if (magnitude >= floor) {
+        alpha = 1;
+      } else if (faded) {
+        alpha = floor > 0 ? magnitude / floor : 0;
+      } else {
+        alpha = 0;
+      }
+      if (alpha <= 0.01) continue;
+      // Both modes run the colour from zero now, so a given value keeps its
+      // colour when the threshold moves; only what is hidden changes.
+      var colour = mix(stops, Math.min(Math.max(magnitude / high, 0), 1));
+      ctx.fillStyle = "rgba(" + colour[0] + "," + colour[1] + "," + colour[2] + "," + alpha.toFixed(3) + ")";
+      ctx.fillRect(x, 0, 1, barHeight);
+    }
+    ctx.strokeStyle = style.getPropertyValue("--line").trim() || "#26313B";
+    ctx.strokeRect(0.5, 0.5, width - 1, barHeight - 1);
+    ctx.fillStyle = ink;
+    ctx.font = '10px "IBM Plex Mono", ui-monospace, monospace';
+    ctx.textAlign = "center";
+    // Ticks always; labels only where they will not overprint the one before,
+    // because a low threshold on a wide window puts -floor, 0 and floor within
+    // a few pixels of each other.
+    var written = -Infinity;
+    [-high, -floor, 0, floor, high].forEach(function (value) {
+      var x = ((value + high) / (2 * high)) * (width - 1);
+      ctx.fillRect(x, barHeight, 1, 4);
+      var text = format(value);
+      var at = Math.min(Math.max(x, 18), width - 18);
+      var half = ctx.measureText(text).width / 2 + 3;
+      if (at - half < written) return;
+      ctx.fillText(text, at, barHeight + 15);
+      written = at + half;
+    });
+  }
+
+  function rampCss() {
+    var stops = [];
+    for (var i = 0; i <= 10; i += 1) {
+      var t = i / 10;
+      var c = mix(NEG_STOPS, 1 - t * 2 >= 0 ? 1 - t * 2 : 0);
+      if (t > 0.5) c = mix(POS_STOPS, (t - 0.5) * 2);
+      var edge = Math.abs(t - 0.5) * 2;
+      var a = state.blend === "soft" ? Math.min(1, edge / 0.55) : (edge > 0.02 ? 1 : 0);
+      stops.push("rgba(" + c[0] + "," + c[1] + "," + c[2] + "," + a.toFixed(2) + ") " + (t * 100) + "%");
+    }
+    return "linear-gradient(90deg," + stops.join(",") + ")";
+  }
+
+  function currentMap() {
+    var maps = state.endpoint.maps;
+    for (var i = 0; i < maps.length; i += 1) {
+      if (maps[i].subject === state.subject && maps[i].feature === state.feature) return maps[i];
+    }
+    return null;
+  }
+
+  // ---- anatomy-to-anatomy crosshair linkage ------------------------------
+  // Subject anatomies share no coordinate system, so a montage of them cannot
+  // link crosshairs directly. Each subject ships two lookup fields, anat->MNI
+  // and MNI->anat, and a move becomes: source anat mm -> MNI mm -> every other
+  // subject's anat mm.
+  var coordCache = boundedCache(6);
+
+  function loadCoordField(spec) {
+    return coordCache.get(spec.path, function () {
+      return fetch(spec.path).then(function (response) {
+        return response.arrayBuffer();
+      }).then(function (buffer) {
+      var dims = spec.dims;
+      var count = dims[0] * dims[1] * dims[2];
+      var values = new Float32Array(buffer);
+      var a = spec.affine;
+      // Invert the 3x3 and fold in the translation so world mm can be turned
+      // back into a voxel index.
+      var m = [[a[0], a[1], a[2]], [a[4], a[5], a[6]], [a[8], a[9], a[10]]];
+      var origin = [a[3], a[7], a[11]];
+      var det =
+        m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) -
+        m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) +
+        m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+      var inv = [
+        [(m[1][1] * m[2][2] - m[1][2] * m[2][1]) / det,
+         (m[0][2] * m[2][1] - m[0][1] * m[2][2]) / det,
+         (m[0][1] * m[1][2] - m[0][2] * m[1][1]) / det],
+        [(m[1][2] * m[2][0] - m[1][0] * m[2][2]) / det,
+         (m[0][0] * m[2][2] - m[0][2] * m[2][0]) / det,
+         (m[0][2] * m[1][0] - m[0][0] * m[1][2]) / det],
+        [(m[1][0] * m[2][1] - m[1][1] * m[2][0]) / det,
+         (m[0][1] * m[2][0] - m[0][0] * m[2][1]) / det,
+         (m[0][0] * m[1][1] - m[0][1] * m[1][0]) / det]
+      ];
+        return { dims: dims, values: values, count: count, inv: inv, origin: origin };
+      });
+    });
+  }
+
+  function sampleField(field, mm) {
+    var d = [mm[0] - field.origin[0], mm[1] - field.origin[1], mm[2] - field.origin[2]];
+    var exact = [0, 1, 2].map(function (row) {
+      return field.inv[row][0] * d[0] + field.inv[row][1] * d[1] + field.inv[row][2] * d[2];
+    });
+    var base = exact.map(Math.floor);
+    var frac = [0, 1, 2].map(function (i) { return exact[i] - base[i]; });
+    for (var i = 0; i < 3; i += 1) {
+      if (base[i] < 0 || base[i] + 1 >= field.dims[i]) return null;
+    }
+    // Trilinear: the fields are smooth, so interpolating recovers most of what
+    // the coarse grid gives up.
+    var out = [0, 0, 0];
+    var weightTotal = 0;
+    for (var dx = 0; dx < 2; dx += 1) {
+      for (var dy = 0; dy < 2; dy += 1) {
+        for (var dz = 0; dz < 2; dz += 1) {
+          var w = (dx ? frac[0] : 1 - frac[0]) * (dy ? frac[1] : 1 - frac[1]) *
+                  (dz ? frac[2] : 1 - frac[2]);
+          if (w === 0) continue;
+          var index = ((base[0] + dx) * field.dims[1] + (base[1] + dy)) * field.dims[2] +
+                      (base[2] + dz);
+          var sample = [
+            field.values[index],
+            field.values[index + field.count],
+            field.values[index + 2 * field.count]
+          ];
+          if (sample[0] === 0 && sample[1] === 0 && sample[2] === 0) continue;
+          out[0] += w * sample[0];
+          out[1] += w * sample[1];
+          out[2] += w * sample[2];
+          weightTotal += w;
+        }
+      }
+    }
+    if (weightTotal < 0.25) return null;
+    return [out[0] / weightTotal, out[1] / weightTotal, out[2] / weightTotal];
+  }
+
+  function subjectSpaceEntry() {
+    var space = state.manifest.subject_space;
+    if (!space || !space.maps) return null;
+    for (var i = 0; i < space.maps.length; i += 1) {
+      var m = space.maps[i];
+      if (m.report === state.report.id && m.endpoint === state.endpoint.id &&
+          m.feature === state.feature && m.subject === state.subject) return m;
+    }
+    return null;
+  }
+
+  function inSubjectSpace() {
+    return state.space === "subject" && subjectSpaceEntry() !== null;
+  }
+
+  function interpolateCurve(xs, ys, x) {
+    if (!xs || !ys || !xs.length) return null;
+    if (x <= xs[0]) return ys[0];
+    if (x >= xs[xs.length - 1]) return ys[ys.length - 1];
+    for (var i = 1; i < xs.length; i += 1) {
+      if (x <= xs[i]) {
+        var yLow = ys[i - 1], yHigh = ys[i];
+        if (yLow === null || yHigh === null) return yHigh === null ? yLow : yHigh;
+        var span = Math.log(xs[i]) - Math.log(xs[i - 1]);
+        var f = span === 0 ? 0 : (Math.log(x) - Math.log(xs[i - 1])) / span;
+        return yLow + (yHigh - yLow) * f;
+      }
+    }
+    return ys[ys.length - 1];
+  }
+
+  function thresholdFor(entry) {
+    var requested = parseFloat(el["threshold-input"].value);
+    if (!isFinite(requested) || requested < 0) requested = 0;
+    var mode = state.thresholdMode;
+    var curves = entry && entry.thresholds;
+    if (mode === "value" || !curves) {
+      return { floor: requested, label: "≥ " + format(requested) };
+    }
+    if (mode === "p") {
+      var tp = interpolateCurve(curves.p, curves.p_t, requested);
+      return tp === null
+        ? { floor: requested, label: "no curve" }
+        : { floor: tp, label: "p<" + requested + " → t ≥ " + format(tp) };
+    }
+    if (!curves.q) return { floor: requested, label: "no FDR curve" };
+    var tq = interpolateCurve(curves.q, curves.q_t, requested);
+    if (tq === null || tq === undefined) {
+      return { floor: Infinity, label: "q<" + requested + ": no voxels survive" };
+    }
+    return { floor: tq, label: "q<" + requested + " → t ≥ " + format(tq) };
+  }
+
+  // A fixed step is useless across p=0.05 and p=1e-9, so the arrows move by a
+  // tenth of the current order of magnitude and get finer as the value falls.
+  function adaptiveStep(value) {
+    if (!isFinite(value) || value <= 0) return 0.0001;
+    var magnitude = Math.pow(10, Math.floor(Math.log(value) / Math.LN10));
+    return Number((magnitude / 10).toPrecision(1));
+  }
+
+  function retuneStep(input) {
+    var value = parseFloat(input.value);
+    input.step = adaptiveStep(value);
+  }
+
+  function sliderCeiling() {
+    // In p and FDR modes the knob runs over probabilities, not map units.
+    return state.thresholdMode === "value" ? state.endpoint.range[1] * 1.25 : 1;
+  }
+
+  function syncDual() {
+    var ceiling = sliderCeiling();
+    var low = Math.min(Math.max(parseFloat(el["threshold-input"].value) || 0, 0), ceiling);
+    var high = Math.min(Math.max(parseFloat(el["window-max"].value) || ceiling, 0), ceiling);
+    var track = el.dual.clientWidth || 190;
+    var lowX = (low / ceiling) * track;
+    var highX = state.thresholdMode === "value" ? (high / ceiling) * track : track;
+    el["knob-min"].style.left = lowX + "px";
+    el["knob-max"].style.left = highX + "px";
+    el["dual-fill"].style.left = Math.min(lowX, highX) + "px";
+    el["dual-fill"].style.width = Math.abs(highX - lowX) + "px";
+    // Only the threshold knob is meaningful for a probability; the window
+    // maximum stays in map units and is hidden in those modes.
+    var probability = state.thresholdMode !== "value";
+    el["knob-max"].hidden = probability;
+    el["window-max"].hidden = probability;
+    el["window-reset"].hidden = probability;
+    el["knob-min"].setAttribute("aria-disabled", "false");
+  }
+
+  function wireDual() {
+    [["knob-min", "threshold-input"], ["knob-max", "window-max"]].forEach(function (pair) {
+      var knob = el[pair[0]], input = el[pair[1]];
+      var dragging = false;
+      function move(event) {
+        if (!dragging) return;
+        var box = el.dual.getBoundingClientRect();
+        var fraction = Math.min(Math.max((event.clientX - box.left) / box.width, 0), 1);
+        input.value = Number((fraction * sliderCeiling()).toPrecision(3));
+        retuneStep(input);
+        refreshStyle();
+      }
+      knob.addEventListener("pointerdown", function (event) {
+        dragging = true;
+        try { knob.setPointerCapture(event.pointerId); } catch (ignored) {}
+        event.preventDefault();
+      });
+      knob.addEventListener("pointermove", move);
+      ["pointerup", "pointercancel"].forEach(function (name) {
+        knob.addEventListener(name, function () { dragging = false; });
+      });
+    });
+  }
+
+  function windowMax() {
+    var value = parseFloat(el["window-max"].value);
+    return isFinite(value) && value > 0 ? value : state.endpoint.range[1];
+  }
+
+  function applyStyle(instance, entry) {
+    if (!instance || instance.volumes.length < 2) return;
+    var overlay = instance.volumes[1];
+    var high = windowMax();
+    var picked = thresholdFor(entry);
+    overlay.colormapType = blendFor("volume");
+    // setColormap costs ~35 ms because it rebuilds every layer, and the
+    // colormap never changes after load. Assign the names plainly and let the
+    // refreshLayers below pick them up.
+    overlay.colormap = "tompos";
+    overlay.colormapNegative = "tomneg";
+    overlay.cal_min = picked.floor;
+    overlay.cal_max = high;
+    overlay.cal_minNeg = -high;
+    overlay.cal_maxNeg = -picked.floor;
+    overlay.opacity = el.opacity.value / 100;
+    try {
+      compositeLayers(instance);
+    } catch (ignored) {
+      instance.updateGLVolume();
+    }
+    return picked;
+  }
+
+  // Layer 1 creates the shared overlay texture; layer 2 blends onto whatever
+  // is already in it. Refreshing layer 2 on its own therefore stacks the
+  // regions on top of themselves, which is what drove the opacity slider to
+  // fully opaque after a few drag events. Any change to either layer
+  // re-composites both, in order. Two refreshLayers calls cost ~5 ms against
+  // ~32 ms for updateGLVolume rebuilding the background as well.
+  function compositeLayers(instance) {
+    if (!instance || instance.volumes.length < 2) return;
+    instance.refreshLayers(instance.volumes[1], 1);
+    if (instance.volumes.length > 2) {
+      instance.refreshLayers(instance.volumes[2], 2);
+    }
+    instance.drawScene();
+  }
+
+  var stylePending = false;
+
+  function refreshStyle() {
+    if (stylePending) return;
+    stylePending = true;
+    window.requestAnimationFrame(function () {
+      stylePending = false;
+      refreshStyleNow();
+    });
+  }
+
+  // Every segmented control marks its active button with aria-pressed, which
+  // is also what the CSS styles on.
+  function setPressed(group, attribute, value) {
+    if (!group) return;
+    Array.prototype.forEach.call(group.children, function (node) {
+      node.setAttribute("aria-pressed", node.getAttribute(attribute) === value ? "true" : "false");
+    });
+  }
+
+  // The entry whose thresholds and range the controls describe. In surface
+  // mode that is the subject-space map being projected, not a volume layer.
+  function styleEntry() {
+    if (state.mode === "surface") {
+      return state.surfaceSpace === "fsaverage"
+        ? currentMap() : (subjectSpaceEntry() || currentMap());
+    }
+    // In subject space the map on screen is the subject-space one, and an FDR
+    // threshold belongs to the map it was computed on: the same effect in two
+    // spaces has a different voxel count and a different distribution of p, so
+    // reading the template map's q curve here would answer about the wrong
+    // map. The p curve is analytic and would have been fine either way.
+    if (state.space === "subject") return subjectSpaceEntry() || currentMap();
+    return currentMap();
+  }
+
+  function refreshStyleNow() {
+    var entry = styleEntry();
+    // Derive the threshold directly rather than from whatever a volume
+    // happened to return: in surface mode there is no volume, and the
+    // controls used to freeze because of it.
+    var picked = thresholdFor(entry);
+    if (state.mode === "surface") {
+      restyleSurface(picked);
+    } else {
+      applyStyle(nv, currentMap());
+      montageViews.forEach(function (view) { applyStyle(view.nv, view.entry); });
+    }
+    el["threshold-value"].textContent = picked.label || "±" + format(picked.floor);
+    syncDual();
+    drawColorbar(picked.floor, windowMax());
+  }
+
+  // Every cache here holds whole volumes or whole surfaces, so an unbounded
+  // one is a slow leak: browsing eight subjects would pin every map, every
+  // anatomy and every geometry either of them ever showed. Least-recently-used
+  // eviction keeps a working set without keeping the session's history.
+  function boundedCache(limit) {
+    var entries = new Map();
+    return {
+      get: function (key, make) {
+        if (entries.has(key)) {
+          var hit = entries.get(key);
+          entries.delete(key);
+          entries.set(key, hit);
+          return hit;
+        }
+        var value = make();
+        entries.set(key, value);
+        while (entries.size > limit) {
+          entries.delete(entries.keys().next().value);
+        }
+        return value;
+      },
+      clear: function () { entries.clear(); }
+    };
+  }
+
+  var imageCache = boundedCache(40);
+  var PREFETCH_LIMIT = 24;
+
+  // NVImage decoding is the slow part of a switch, so decoded volumes are kept
+  // and cloned per instance. Cloning matters: a volume handed to two NiiVue
+  // instances would share mutable display state.
+  function loadImage(path) {
+    return imageCache.get(path, function () {
+      return NVImage.loadFromUrl({
+        url: path, name: path.split("/").pop(), trustCalMinMax: false
+      });
+    }).then(function (image) {
+      try { return image.clone(); } catch (ignored) { return image; }
+    });
+  }
+
+  // Once the selected map is up, quietly fetch what the reader is most likely
+  // to ask for next, two at a time so it never competes with a visible panel.
+  // The order matters more than the number: the same subject in the other
+  // endpoints comes first, because clicking down the endpoint list is how a
+  // comparison is actually read, and the endpoint list is the one switch that
+  // used to wait on the network every single time.
+  var warming = 0;
+  var warmQueue = [];
+  var warmToken = 0;
+
+  function warmNext(token) {
+    while (warming < 2 && warmQueue.length) {
+      if (token !== warmToken) { warmQueue = []; return; }
+      var path = warmQueue.shift();
+      warming += 1;
+      imageCache.get(path, function () {
+        return NVImage.loadFromUrl({
+          url: path, name: path.split("/").pop(), trustCalMinMax: false
+        });
+      }).then(function () {
+        warming -= 1; warmNext(token);
+      }, function () {
+        warming -= 1; warmNext(token);
+      });
+    }
+  }
+
+  function prefetchSiblings() {
+    if (!state.endpoint) return;
+    var wanted = [];
+    var seen = {};
+    function want(path) {
+      if (!path || seen[path]) return;
+      seen[path] = 1;
+      wanted.push(path);
+    }
+    // 1. the same subject wherever else it appears, in rail order
+    (state.manifest.reports || []).forEach(function (report) {
+      report.endpoints.forEach(function (endpoint) {
+        endpoint.maps.forEach(function (entry) {
+          if (entry.subject === state.subject && entry.feature === state.feature) want(entry.path);
+        });
+      });
+    });
+    // 2. the rest of this endpoint, which is the montage and the subject strip
+    state.endpoint.maps.forEach(function (entry) {
+      if (entry.feature === state.feature) want(entry.path);
+    });
+    warmToken += 1;
+    warmQueue = wanted.slice(0, PREFETCH_LIMIT);
+    var token = warmToken;
+    if (window.requestIdleCallback) {
+      window.requestIdleCallback(function () { warmNext(token); }, { timeout: 1500 });
+    } else {
+      window.setTimeout(function () { warmNext(token); }, 250);
+    }
+  }
+
+  // Every multi-pane view is built from independent NiiVue instances rather
+  // than NiiVue's own multiplanar layout, because pan and zoom live on the
+  // scene and would otherwise move all three planes together.
+  // ---- regions ------------------------------------------------------------
+  // Twenty hues that stay apart from each other and from the map's own warm
+  // and cool ramps. A region keeps the colour it was given when it was turned
+  // on, so adding another region never restyles the ones already showing.
+  var ROI_COLOURS = [
+    [230, 74, 60], [45, 156, 219], [96, 190, 90], [247, 165, 30],
+    [168, 110, 219], [60, 200, 190], [235, 110, 175], [150, 160, 45],
+    [120, 130, 245], [240, 140, 90], [70, 180, 140], [205, 95, 210],
+    [90, 170, 230], [200, 190, 70], [240, 120, 130], [110, 200, 120],
+    [180, 130, 90], [130, 200, 230], [220, 160, 220], [80, 150, 160]
+  ];
+
+  var colourSlots = {};
+  var slotOwners = [];
+
+  function colourSlot(key) {
+    if (colourSlots[key] !== undefined) return colourSlots[key];
+    var slot = 0;
+    while (slotOwners[slot] !== undefined) slot += 1;
+    slotOwners[slot] = key;
+    colourSlots[key] = slot;
+    return slot;
+  }
+
+  function releaseColour(key) {
+    var slot = colourSlots[key];
+    if (slot === undefined) return;
+    slotOwners[slot] = undefined;
+    delete colourSlots[key];
+  }
+
+  function colourOf(key) {
+    return ROI_COLOURS[colourSlot(key) % ROI_COLOURS.length];
+  }
+  var atlasCache = boundedCache(6);
+
+  function allAtlases() {
+    return ((state.manifest.atlas || {}).atlases) || [];
+  }
+
+  function currentAtlas() {
+    var atlases = allAtlases();
+    if (!atlases.length) return null;
+    return atlases.filter(function (a) { return a.id === state.atlas; })[0] || atlases[0];
+  }
+
+  // Keyed by atlas so cortical and subcortical selections coexist; switching
+  // the list no longer throws the other atlas's choices away.
+  function regionKey(atlasId, value) {
+    return atlasId + ":" + value;
+  }
+
+  function selectionFor(atlasId) {
+    return Object.keys(state.regions)
+      .filter(function (key) { return state.regions[key] && key.indexOf(atlasId + ":") === 0; })
+      .map(function (key) { return Number(key.split(":")[1]); })
+      .sort(function (a, b) { return a - b; });
+  }
+
+  function activeSelection() {
+    var out = [];
+    allAtlases().forEach(function (atlas) {
+      selectionFor(atlas.id).forEach(function (value) {
+        out.push({ atlas: atlas, value: value });
+      });
+    });
+    return out;
+  }
+
+  function atlasPath(atlas, subject) {
+    if (!atlas) return null;
+    if (state.space === "subject") {
+      // Each montage panel is a different brain, so the atlas has to follow
+      // the panel's subject rather than whichever one the toolbar has selected.
+      var perSubject = (state.manifest.atlas.subject || {})[subject];
+      return perSubject ? perSubject[atlas.id] : null;
+    }
+    return atlas.mni;
+  }
+
+  function loadAtlasVolume(path) {
+    return atlasCache.get(path, function () {
+      return NVImage.loadFromUrl({
+        url: path, name: path.split("/").pop(), trustCalMinMax: false
+      });
+    });
+  }
+
+  var maskCache = boundedCache(6);
+
+  function maskKey(subject, selection) {
+    return state.space + "|" + subject + "|" +
+      selection.map(function (s) { return s.atlas.id + ":" + s.value; }).join(",");
+  }
+
+  // One mask carrying every selected region from every atlas, cached so
+  // toggling the same set back on costs nothing.
+  function buildMask(subject, selection) {
+    var key = maskKey(subject, selection);
+    return maskCache.get(key, function () {
+      var paths = [];
+      selection.forEach(function (item) {
+        var path = atlasPath(item.atlas, subject);
+        if (path && paths.indexOf(path) === -1) paths.push(path);
+      });
+      if (!paths.length) return Promise.resolve(null);
+      return Promise.all(paths.map(loadAtlasVolume)).then(function (images) {
+        var base = images[0].clone();
+        var data = base.img;
+        var slots = [];
+        selection.forEach(function (item, index) {
+          var path = atlasPath(item.atlas, subject);
+          slots.push({ image: images[paths.indexOf(path)], value: item.value, slot: index + 1 });
+        });
+        for (var i = 0; i < data.length; i += 1) {
+          var assigned = 0;
+          for (var s = 0; s < slots.length; s += 1) {
+            if (slots[s].image.img[i] === slots[s].value) { assigned = slots[s].slot; break; }
+          }
+          data[i] = assigned;
+        }
+        base.cal_min = 0.5;
+        base.cal_max = 255;
+        base.colormap = "roi";
+        base.colormapNegative = "";
+        base.colormapType = 0;
+        return base;
+      });
+    });
+  }
+
+  var regionToken = 0;
+
+  function applyRegions(instance, token, subject) {
+    if (!instance) return Promise.resolve();
+    var selection = activeSelection();
+    var opacity = el["roi-opacity"].value / 100;
+    var existing = instance.volumes.length > 2 ? instance.volumes[2] : null;
+    if (!selection.length) {
+      if (existing) instance.removeVolume(existing);
+      instance.drawScene();
+      return Promise.resolve();
+    }
+    return buildMask(subject, selection).then(function (mask) {
+      if (!mask || token !== regionToken) return;
+      registerRegionColormap(instance, selection.length);
+      if (existing && existing.img.length === mask.img.length) {
+        // Swapping the data in place avoids a full volume rebuild, which is
+        // what made toggling regions crawl in montage.
+        existing.img.set(mask.img);
+        existing.cal_min = 0.5;
+        existing.cal_max = 255;
+        existing.colormap = "roi";
+        existing.opacity = opacity;
+        compositeLayers(instance);
+        return;
+      }
+      if (existing) instance.removeVolume(existing);
+      var added = mask.clone();
+      instance.addVolume(added);
+      // addVolume re-derives the window and resets the colormap, so the
+      // display properties have to be set after it, not on the clone.
+      added.colormap = "roi";
+      added.colormapNegative = "";
+      added.colormapType = 0;
+      added.cal_min = 0.5;
+      added.cal_max = 255;
+      added.opacity = opacity;
+      instance.updateGLVolume();
+    });
+  }
+
+  function refreshRegions() {
+    if (state.mode === "surface") { drawAnnotations(true); return; }
+    var token = ++regionToken;
+    if (montageViews.length) {
+      montageViews.forEach(function (view) { applyRegions(view.nv, token, view.subject); });
+    } else {
+      applyRegions(nv, token, state.subject);
+    }
+  }
+
+  // Every canvas reports through here. Each montage panel is its own NiiVue
+  // instance, and the crosshair-linking handlers replaced this one wholesale,
+  // which is why the value and the region went blank as soon as panels
+  // appeared -- which is to say, in every view except the single one.
+  function reportLocation(location) {
+    if (!location) return;
+    if (location.vox) el.coords.textContent = Array.from(location.vox).join(", ");
+    var values = location.values;
+    el["voxel-value"].textContent =
+      values && values.length > 1 && typeof values[1].value === "number"
+        ? format(values[1].value)
+        : "—";
+    var region = regionNameAt(values);
+    el["roi-readout"].textContent = region ? "region " + region : "";
+  }
+
+  function regionNameAt(values) {
+    // The mask stores a colour slot, so the lookup goes through the slot's
+    // owner rather than through the position in the list.
+    if (!values || values.length < 3) return "";
+    var index = Math.round(values[2].value);
+    if (!index) return "";
+    var key = slotOwners[index - 1];
+    if (!key) return "";
+    var parts = key.split(":");
+    var atlas = allAtlases().filter(function (a) { return a.id === parts[0]; })[0];
+    if (!atlas) return "";
+    var match = atlas.regions.filter(function (r) { return r.value === Number(parts[1]); })[0];
+    return match ? match.name : "";
+  }
+
+  function updateSwatches() {
+    Array.prototype.forEach.call(el["roi-list"].children, function (row) {
+      var key = row.getAttribute("data-region");
+      var index = state.regions[key] ? colourSlot(key) : -1;
+      var swatch = row.querySelector(".roi-swatch");
+      swatch.style.background = index === -1
+        ? "transparent"
+        : "rgb(" + ROI_COLOURS[index % ROI_COLOURS.length].join(",") + ")";
+      swatch.style.border = index === -1 ? "1px solid var(--line)" : "0";
+    });
+  }
+
+  // "Left Thalamus" and "Right Thalamus" belong next to each other, so the
+  // list sorts on the name with any side word pulled off the front.
+  function regionSortKey(name) {
+    var stripped = name.replace(/^\s*(Left|Right)\s+/i, "");
+    var side = /^\s*Right\s+/i.test(name) ? 1 : 0;
+    return stripped.toLowerCase() + "\u0000" + side;
+  }
+
+  // Volumes carry an anatomical atlas; surfaces carry pycortex's hand-drawn
+  // ROIs. They are different catalogues, so the panel shows whichever belongs
+  // to the mode rather than pretending one covers both.
+  function renderSurfaceRegionList() {
+    el["atlas-choice"].textContent = "";
+    var label = document.createElement("button");
+    label.type = "button";
+    label.textContent = "pycortex ROIs";
+    label.setAttribute("aria-pressed", "true");
+    label.disabled = true;
+    el["atlas-choice"].appendChild(label);
+    el["roi-list"].textContent = "";
+    var filter = (el["roi-filter"].value || "").toLowerCase();
+    var order = surfaceSelection();
+    surfaceRegionNames().sort(function (a, b) {
+      return regionSortKey(a) < regionSortKey(b) ? -1 : 1;
+    }).forEach(function (name) {
+      if (filter && name.toLowerCase().indexOf(filter) === -1) return;
+      var row = document.createElement("label");
+      row.setAttribute("data-region", name);
+      var box = document.createElement("input");
+      box.type = "checkbox";
+      box.checked = !!state.surfaceRegions[name];
+      box.addEventListener("change", function () {
+        state.surfaceRegions[name] = box.checked;
+        if (box.checked) colourSlot("surface:" + name);
+        else releaseColour("surface:" + name);
+        renderSurfaceRegionList();
+        paintSurfaceRegions();
+      });
+      var swatch = document.createElement("span");
+      swatch.className = "roi-swatch";
+      // Outlines are white on the surface, so the swatch says selected
+      // rather than pretending to identify a colour.
+      var chosen = !!state.surfaceRegions[name];
+      swatch.style.background = chosen ? "rgb(236, 242, 248)" : "transparent";
+      swatch.style.border = chosen ? "0" : "1px solid var(--line)";
+      var text = document.createElement("span");
+      text.textContent = name;
+      row.appendChild(box);
+      row.appendChild(swatch);
+      row.appendChild(text);
+      el["roi-list"].appendChild(row);
+    });
+  }
+
+  function renderRegionList() {
+    if (state.mode === "surface") { renderSurfaceRegionList(); return; }
+    var atlas = currentAtlas();
+    el["atlas-choice"].textContent = "";
+    allAtlases().forEach(function (candidate) {
+      var node = document.createElement("button");
+      node.type = "button";
+      node.textContent = candidate.label || candidate.id;
+      node.setAttribute("aria-pressed", atlas && candidate.id === atlas.id ? "true" : "false");
+      node.addEventListener("click", function () {
+        // Only the visible list changes; selections in the other atlas stay.
+        state.atlas = candidate.id;
+        renderRegionList();
+      });
+      el["atlas-choice"].appendChild(node);
+    });
+    el["roi-list"].textContent = "";
+    if (!atlas) return;
+    var filter = (el["roi-filter"].value || "").toLowerCase();
+    atlas.regions.slice().sort(function (a, b) {
+      return regionSortKey(a.name) < regionSortKey(b.name) ? -1 : 1;
+    }).forEach(function (region) {
+      if (filter && region.name.toLowerCase().indexOf(filter) === -1) return;
+      var key = regionKey(atlas.id, region.value);
+      var row = document.createElement("label");
+      row.setAttribute("data-region", key);
+      var box = document.createElement("input");
+      box.type = "checkbox";
+      box.checked = !!state.regions[key];
+      box.addEventListener("change", function () {
+        state.regions[key] = box.checked;
+        if (box.checked) colourSlot(key); else releaseColour(key);
+        updateSwatches();
+        refreshRegions();
+      });
+      var swatch = document.createElement("span");
+      swatch.className = "roi-swatch";
+      var text = document.createElement("span");
+      text.textContent = region.name;
+      row.appendChild(box);
+      row.appendChild(swatch);
+      row.appendChild(text);
+      el["roi-list"].appendChild(row);
+    });
+    updateSwatches();
+  }
+
+  // ---- surfaces -------------------------------------------------------------
+  var surfaceParts = [];
+  var panelSpace = null;
+  var panelCoarse = null;
+
+  // Two kinds of surface: the subject's own anatomy, and fsaverage, which is
+  // what a group map in MNI has to be projected onto because it belongs to no
+  // one brain.
+  function surfaceRecord() {
+    var surfaces = state.manifest.surfaces || {};
+    if (state.surfaceSpace === "fsaverage") return surfaces.fsaverage || null;
+    return surfaces[state.subject] || null;
+  }
+
+  function surfacesAvailable() {
+    var surfaces = state.manifest.surfaces || {};
+    return !!(surfaces.fsaverage || surfaces[state.subject]);
+  }
+
+  // fsaverage vertices are in MNI305 and the maps are in MNI152, so the
+  // sampler walks the vertex through that affine first.
+  function transformedSampler(sample, transform) {
+    if (!transform) return sample;
+    var m = transform;
+    return function (x, y, z) {
+      return sample(
+        m[0][0] * x + m[0][1] * y + m[0][2] * z + m[0][3],
+        m[1][0] * x + m[1][1] * y + m[1][2] * z + m[1][3],
+        m[2][0] * x + m[2][1] * y + m[2][2] * z + m[2][3]
+      );
+    };
+  }
+
+  // Sampling a volume at a vertex is the whole trick: the surface is in the
+  // subject's anatomical world space and so is the map, so a vertex coordinate
+  // goes straight through the volume's inverse affine.
+  function volumeSampler(image) {
+    var m = image.matRAS ? Array.from(image.matRAS) : null;
+    var dims = image.dimsRAS ? Array.from(image.dimsRAS) : null;
+    if (dims && dims.length === 4) dims = dims.slice(1);
+    if (!m || !dims) return function () { return 0; };
+    var a = [[m[0], m[1], m[2]], [m[4], m[5], m[6]], [m[8], m[9], m[10]]];
+    var origin = [m[3], m[7], m[11]];
+    var det =
+      a[0][0] * (a[1][1] * a[2][2] - a[1][2] * a[2][1]) -
+      a[0][1] * (a[1][0] * a[2][2] - a[1][2] * a[2][0]) +
+      a[0][2] * (a[1][0] * a[2][1] - a[1][1] * a[2][0]);
+    if (!det) return function () { return 0; };
+    var inv = [
+      [(a[1][1] * a[2][2] - a[1][2] * a[2][1]) / det,
+       (a[0][2] * a[2][1] - a[0][1] * a[2][2]) / det,
+       (a[0][1] * a[1][2] - a[0][2] * a[1][1]) / det],
+      [(a[1][2] * a[2][0] - a[1][0] * a[2][2]) / det,
+       (a[0][0] * a[2][2] - a[0][2] * a[2][0]) / det,
+       (a[0][2] * a[1][0] - a[0][0] * a[1][2]) / det],
+      [(a[1][0] * a[2][1] - a[1][1] * a[2][0]) / det,
+       (a[0][1] * a[2][0] - a[0][0] * a[2][1]) / det,
+       (a[0][0] * a[1][1] - a[0][1] * a[1][0]) / det]
+    ];
+    return function (x, y, z) {
+      var d = [x - origin[0], y - origin[1], z - origin[2]];
+      var vox = [0, 1, 2].map(function (r) {
+        return Math.round(inv[r][0] * d[0] + inv[r][1] * d[1] + inv[r][2] * d[2]);
+      });
+      for (var i = 0; i < 3; i += 1) {
+        if (vox[i] < 0 || vox[i] >= dims[i]) return 0;
+      }
+      var value = image.getValue(vox[0], vox[1], vox[2]);
+      return isFinite(value) ? value : 0;
+    };
+  }
+
+  // Twelve buffers is one subject's geometry, curvature and cut mask with room
+  // to spare.
+  var binaryCache = boundedCache(14);
+
+  function fetchBinary(path) {
+    return binaryCache.get(path, function () {
+      return fetch(path).then(function (response) {
+        if (!response.ok) throw new Error(path + " → " + response.status);
+        return response.arrayBuffer();
+      });
+    });
+  }
+
+  var GEOMETRY_ORDER = ["wm", "pia", "inflated", "flat"];
+  var GEOMETRY_LABELS = { wm: "white", pia: "pial", inflated: "inflated", flat: "flat" };
+
+  // ---- surface renderer -----------------------------------------------------
+  // NiiVue draws the volumes; the surfaces are drawn here instead. Its mesh
+  // pipeline carries position, normal and an 8-bit colour per vertex and
+  // nothing else, and no texture sampler in the mesh shaders, so a region
+  // outline can only ever be as fine as the mesh -- which is what made every
+  // attempt at one look coarse. pycortex gets its clean contours by carrying
+  // flat-map coordinates per vertex and sampling a rasterised drawing through
+  // them, and that is what this does. The flat geometry we already ship *is*
+  // that parameterisation, so the outlines become a picture drawn in flat
+  // space and sampled on whatever geometry is showing.
+  var view = {
+    canvas: null, gl: null, program: null, uniforms: {}, parts: [],
+    ramp: null, overlay: null, overlaySize: 0, ready: false, failed: false
+  };
+
+  var VERTEX_SHADER = [
+    "#version 300 es",
+    "layout(location=0) in vec3 aPos;",
+    "layout(location=1) in float aValue;",
+    "layout(location=2) in float aCurv;",
+    "layout(location=3) in vec2 aUV;",
+    "uniform mat4 uMVP;",
+    "out vec3 vPos;",
+    "out float vValue;",
+    "out float vCurv;",
+    "out vec2 vUV;",
+    "void main() {",
+    "  gl_Position = uMVP * vec4(aPos, 1.0);",
+    "  vPos = aPos;",
+    "  vValue = aValue;",
+    "  vCurv = aCurv;",
+    "  vUV = aUV;",
+    "}"
+  ].join("\n");
+
+  var FRAGMENT_SHADER = [
+    "#version 300 es",
+    "precision highp float;",
+    "in vec3 vPos;",
+    "in float vValue;",
+    "in float vCurv;",
+    "in vec2 vUV;",
+    "uniform sampler2D uRamp;",
+    "uniform sampler2D uOverlay;",
+    "uniform float uThreshold;",
+    "uniform float uWindow;",
+    "uniform float uMapOpacity;",
+    "uniform float uFade;",
+    "uniform float uCurvature;",
+    "uniform float uRoiOpacity;",
+    "uniform int uHasOverlay;",
+    "out vec4 color;",
+    "void main() {",
+    // Curvature underneath: sulci dark, gyri light, pycortex style.
+    "  float shade = 0.66 + (vCurv > 0.0 ? -0.20 : 0.18) * uCurvature;",
+    "  vec3 base = vec3(shade);",
+    // The statistic, through the same ramp the slices use.
+    "  float magnitude = abs(vValue);",
+    "  float level = clamp(magnitude / max(uWindow, 1e-6), 0.0, 1.0);",
+    "  float u = vValue >= 0.0 ? 0.5 + level * 0.5 : 0.5 - level * 0.5;",
+    "  vec3 hue = texture(uRamp, vec2(u, 0.5)).rgb;",
+    "  float coverage = magnitude >= uThreshold ? 1.0",
+    "    : (uFade > 0.5 ? pow(magnitude / max(uThreshold, 1e-6), 2.0) : 0.0);",
+    "  base = mix(base, hue, coverage * uMapOpacity);",
+    // Soft lighting, no specular: the folds read without a hot spot, and a
+    // flat sheet, whose every normal faces the viewer, stays bright.
+    "  vec3 normal = normalize(cross(dFdx(vPos), dFdy(vPos)));",
+    "  vec3 light = normalize(vec3(-0.35, 0.55, -0.75));",
+    "  float lambert = abs(dot(normal, light));",
+    "  vec3 lit = base * (0.42 + 0.58 * lambert);",
+    // The region drawing goes on after the light, not before it. A contour
+    // shaded like the cortex dims wherever the surface turns away, and a
+    // dimmer line reads as a thinner one; keeping most of its brightness is
+    // what makes the width look even all the way round.
+    "  if (uHasOverlay == 1 && vUV.x >= 0.0) {",
+    "    vec4 ink = texture(uOverlay, vUV);",
+    "    vec3 inkLit = ink.rgb * (0.78 + 0.22 * lambert);",
+    "    lit = mix(lit, inkLit, ink.a * uRoiOpacity);",
+    "  }",
+    "  color = vec4(lit, 1.0);",
+    "}"
+  ].join("\n");
+
+  function compileShader(gl, type, source) {
+    var shader = gl.createShader(type);
+    gl.shaderSource(shader, source);
+    gl.compileShader(shader);
+    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+      throw new Error(gl.getShaderInfoLog(shader) || "shader failed");
+    }
+    return shader;
+  }
+
+  function viewInit() {
+    if (view.ready || view.failed) return view.ready;
+    view.canvas = el["surface-gl"];
+    var gl = view.canvas.getContext("webgl2", {
+      antialias: true, alpha: false, depth: true, premultipliedAlpha: false
+    });
+    if (!gl) { view.failed = true; return false; }
+    view.gl = gl;
+    try {
+      var program = gl.createProgram();
+      gl.attachShader(program, compileShader(gl, gl.VERTEX_SHADER, VERTEX_SHADER));
+      gl.attachShader(program, compileShader(gl, gl.FRAGMENT_SHADER, FRAGMENT_SHADER));
+      gl.linkProgram(program);
+      if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+        throw new Error(gl.getProgramInfoLog(program) || "link failed");
+      }
+      view.program = program;
+      ["uMVP", "uRamp", "uOverlay", "uThreshold", "uWindow", "uMapOpacity",
+       "uFade", "uCurvature", "uRoiOpacity", "uHasOverlay"].forEach(function (name) {
+        view.uniforms[name] = gl.getUniformLocation(program, name);
+      });
+      view.ramp = buildRampTexture(gl);
+      view.overlay = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, view.overlay);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA,
+        gl.UNSIGNED_BYTE, new Uint8Array([0, 0, 0, 0]));
+      gl.enable(gl.DEPTH_TEST);
+      gl.depthFunc(gl.LEQUAL);
+      view.ready = true;
+    } catch (error) {
+      view.failed = true;
+      el.loading.hidden = false;
+      el.loading.textContent = "surface renderer failed: " + error.message;
+    }
+    return view.ready;
+  }
+
+  // The same two ramps the slices and the colourbar use, as one 512-wide
+  // lookup: cool at the left, white in the middle, warm at the right.
+  function buildRampTexture(gl) {
+    var width = 512;
+    var pixels = new Uint8Array(width * 4);
+    for (var i = 0; i < width; i += 1) {
+      var t = i / (width - 1);
+      var level = Math.abs(t - 0.5) * 2;
+      var colour = mix(t >= 0.5 ? POS_STOPS : NEG_STOPS, level);
+      pixels[i * 4] = colour[0];
+      pixels[i * 4 + 1] = colour[1];
+      pixels[i * 4 + 2] = colour[2];
+      pixels[i * 4 + 3] = 255;
+    }
+    var texture = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, 1, 0, gl.RGBA,
+      gl.UNSIGNED_BYTE, pixels);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    return texture;
+  }
+
+  // ---- matrices --------------------------------------------------------------
+  function multiply(a, b) {
+    var out = new Float32Array(16);
+    for (var row = 0; row < 4; row += 1) {
+      for (var col = 0; col < 4; col += 1) {
+        out[col * 4 + row] =
+          a[0 * 4 + row] * b[col * 4 + 0] + a[1 * 4 + row] * b[col * 4 + 1] +
+          a[2 * 4 + row] * b[col * 4 + 2] + a[3 * 4 + row] * b[col * 4 + 3];
+      }
+    }
+    return out;
+  }
+
+  function rotationX(radians) {
+    var c = Math.cos(radians), s = Math.sin(radians);
+    return new Float32Array([1, 0, 0, 0, 0, c, s, 0, 0, -s, c, 0, 0, 0, 0, 1]);
+  }
+
+  function rotationZ(radians) {
+    var c = Math.cos(radians), s = Math.sin(radians);
+    return new Float32Array([c, s, 0, 0, -s, c, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
+  }
+
+  function translation(x, y, z) {
+    return new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, x, y, z, 1]);
+  }
+
+  function orthographic(halfWidth, halfHeight, depth) {
+    return new Float32Array([
+      1 / halfWidth, 0, 0, 0,
+      0, 1 / halfHeight, 0, 0,
+      0, 0, -1 / depth, 0,
+      0, 0, 0, 1
+    ]);
+  }
+
+  // Azimuth turns the scene about the vertical axis, elevation tips it towards
+  // the viewer; both are the angles the rest of the viewer already speaks in.
+  function viewRotation() {
+    return multiply(
+      rotationX((state.elevation - 90) * Math.PI / 180),
+      rotationZ(-state.azimuth * Math.PI / 180)
+    );
+  }
+
+  function sceneBounds() {
+    var lo = [Infinity, Infinity, Infinity];
+    var hi = [-Infinity, -Infinity, -Infinity];
+    surfaceParts.forEach(function (part) {
+      if (!part.bounds) return;
+      for (var a = 0; a < 3; a += 1) {
+        lo[a] = Math.min(lo[a], part.bounds.lo[a]);
+        hi[a] = Math.max(hi[a], part.bounds.hi[a]);
+      }
+    });
+    if (!isFinite(lo[0])) return null;
+    return { lo: lo, hi: hi };
+  }
+
+  // Frame whatever is on screen: rotate the scene's own corners and take the
+  // extent they need. No bounding sphere, so a pair of flat maps fills the
+  // window instead of sitting in the middle of it.
+  function viewMatrix(width, height) {
+    var bounds = sceneBounds();
+    if (!bounds) return null;
+    var centre = [
+      (bounds.lo[0] + bounds.hi[0]) / 2,
+      (bounds.lo[1] + bounds.hi[1]) / 2,
+      (bounds.lo[2] + bounds.hi[2]) / 2
+    ];
+    var rotate = viewRotation();
+    var reachX = 0, reachY = 0, reachZ = 0;
+    for (var corner = 0; corner < 8; corner += 1) {
+      var x = ((corner & 1) ? bounds.hi[0] : bounds.lo[0]) - centre[0];
+      var y = ((corner & 2) ? bounds.hi[1] : bounds.lo[1]) - centre[1];
+      var z = ((corner & 4) ? bounds.hi[2] : bounds.lo[2]) - centre[2];
+      var rx = rotate[0] * x + rotate[4] * y + rotate[8] * z;
+      var ry = rotate[1] * x + rotate[5] * y + rotate[9] * z;
+      var rz = rotate[2] * x + rotate[6] * y + rotate[10] * z;
+      reachX = Math.max(reachX, Math.abs(rx));
+      reachY = Math.max(reachY, Math.abs(ry));
+      reachZ = Math.max(reachZ, Math.abs(rz));
+    }
+    var aspect = width / Math.max(height, 1);
+    var halfHeight = Math.max(reachY, reachX / aspect) * 1.06 / state.surfaceZoom;
+    view.halfHeight = halfHeight;
+    var halfWidth = halfHeight * aspect;
+    var projection = orthographic(halfWidth, halfHeight, Math.max(reachZ * 4, 1));
+    var pan = translation(-state.surfacePan[0], -state.surfacePan[1], 0);
+    return multiply(multiply(projection, pan),
+      multiply(rotate, translation(-centre[0], -centre[1], -centre[2])));
+  }
+
+  // ---- buffers ---------------------------------------------------------------
+  function viewBuild() {
+    if (!viewInit()) return;
+    var gl = view.gl;
+    viewRelease();
+    view.parts = surfaceParts.map(function (part) {
+      var count = part.mesh.pts.length / 3;
+      var entry = {
+        part: part,
+        vao: gl.createVertexArray(),
+        position: gl.createBuffer(),
+        value: gl.createBuffer(),
+        curvature: gl.createBuffer(),
+        uv: gl.createBuffer(),
+        indices: gl.createBuffer(),
+        indexCount: 0,
+        count: count
+      };
+      gl.bindVertexArray(entry.vao);
+
+      gl.bindBuffer(gl.ARRAY_BUFFER, entry.position);
+      gl.bufferData(gl.ARRAY_BUFFER, part.mesh.pts, gl.DYNAMIC_DRAW);
+      gl.enableVertexAttribArray(0);
+      gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
+
+      gl.bindBuffer(gl.ARRAY_BUFFER, entry.value);
+      gl.bufferData(gl.ARRAY_BUFFER, part.values || new Float32Array(count), gl.STATIC_DRAW);
+      gl.enableVertexAttribArray(1);
+      gl.vertexAttribPointer(1, 1, gl.FLOAT, false, 0, 0);
+
+      gl.bindBuffer(gl.ARRAY_BUFFER, entry.curvature);
+      gl.bufferData(gl.ARRAY_BUFFER, part.curvature || new Float32Array(count), gl.STATIC_DRAW);
+      gl.enableVertexAttribArray(2);
+      gl.vertexAttribPointer(2, 1, gl.FLOAT, false, 0, 0);
+
+      gl.bindBuffer(gl.ARRAY_BUFFER, entry.uv);
+      gl.bufferData(gl.ARRAY_BUFFER, flatCoordinates(part), gl.STATIC_DRAW);
+      gl.enableVertexAttribArray(3);
+      gl.vertexAttribPointer(3, 2, gl.FLOAT, false, 0, 0);
+
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, entry.indices);
+      gl.bindVertexArray(null);
+      return entry;
+    });
+    viewIndices();
+  }
+
+  function viewRelease() {
+    if (!view.gl) return;
+    var gl = view.gl;
+    view.parts.forEach(function (entry) {
+      gl.deleteVertexArray(entry.vao);
+      [entry.position, entry.value, entry.curvature, entry.uv, entry.indices]
+        .forEach(function (buffer) { gl.deleteBuffer(buffer); });
+    });
+    view.parts = [];
+  }
+
+  // The flat map doubles as the texture's coordinate system: left hemisphere
+  // in the left half of the picture, right in the right, and anything outside
+  // the flattened patch marked as having no place in it.
+  function flatCoordinates(part) {
+    var count = part.mesh.pts.length / 3;
+    var uv = new Float32Array(count * 2).fill(-1);
+    var flat = part.geometries.flat;
+    if (!flat) return uv;
+    var inPatch = new Uint8Array(count);
+    var tris = part.flatTris || part.baseTris;
+    for (var f = 0; f < tris.length; f += 1) inPatch[tris[f]] = 1;
+    var place = flatPlacement(part);
+    var offset = part.hemisphere === "lh" ? 0 : 0.5;
+    for (var v = 0; v < count; v += 1) {
+      if (!inPatch[v]) continue;
+      // The flat geometry was pre-swung into the plane the opened hemispheres
+      // face, so its own z and y are the picture's across and up.
+      var unit = flatUnit(place, flat[v * 3 + 2], flat[v * 3 + 1]);
+      uv[v * 2] = offset + unit[0] * 0.5;
+      // The picture is uploaded unflipped, so row zero of the texture is the
+      // top of the canvas -- which is where the drawing put the far end of
+      // this axis. Sample it the same way round or the outlines land mirrored.
+      uv[v * 2 + 1] = 1 - unit[1];
+    }
+    return uv;
+  }
+
+  // Flat millimetres to the unit square, the same scale on both axes and
+  // centred in it. Stretching each axis to fill would make a line drawn at one
+  // width come out at two, depending which way it ran.
+  function flatUnit(place, across, up) {
+    return [
+      place.offsetX + (across - place.frame.x0) * place.scale,
+      place.offsetY + (up - place.frame.y0) * place.scale
+    ];
+  }
+
+  function flatPlacement(part) {
+    if (part.flatPlacement) return part.flatPlacement;
+    var frame = flatFrame(part);
+    var scale = Math.min(1 / frame.width, 1 / frame.height);
+    part.flatPlacement = {
+      frame: frame,
+      scale: scale,
+      offsetX: (1 - frame.width * scale) / 2,
+      offsetY: (1 - frame.height * scale) / 2
+    };
+    return part.flatPlacement;
+  }
+
+  function flatFrame(part) {
+    if (part.flatFrame) return part.flatFrame;
+    var flat = part.geometries.flat;
+    var x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+    var count = part.mesh.pts.length / 3;
+    var inPatch = new Uint8Array(count);
+    var tris = part.flatTris || part.baseTris;
+    for (var f = 0; f < tris.length; f += 1) inPatch[tris[f]] = 1;
+    for (var v = 0; v < count; v += 1) {
+      if (!inPatch[v]) continue;
+      var x = flat[v * 3 + 2], y = flat[v * 3 + 1];
+      if (x < x0) x0 = x;
+      if (x > x1) x1 = x;
+      if (y < y0) y0 = y;
+      if (y > y1) y1 = y;
+    }
+    var pad = Math.max(x1 - x0, y1 - y0) * 0.02;
+    part.flatPlacement = null;
+    part.flatFrame = {
+      x0: x0 - pad, y0: y0 - pad,
+      width: (x1 - x0) + pad * 2, height: (y1 - y0) + pad * 2
+    };
+    return part.flatFrame;
+  }
+
+  function viewIndices() {
+    if (!view.ready) return;
+    var gl = view.gl;
+    var flat = flatWeightFor(anim.morph) > 0;
+    view.parts.forEach(function (entry) {
+      var tris = flat && entry.part.flatTris ? entry.part.flatTris : entry.part.baseTris;
+      if (entry.uploaded === tris) return;
+      gl.bindVertexArray(entry.vao);
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, entry.indices);
+      gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, tris, gl.STATIC_DRAW);
+      gl.bindVertexArray(null);
+      entry.indexCount = tris.length;
+      entry.uploaded = tris;
+    });
+  }
+
+  function viewPositions() {
+    if (!view.ready) return;
+    var gl = view.gl;
+    view.parts.forEach(function (entry) {
+      gl.bindBuffer(gl.ARRAY_BUFFER, entry.position);
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, entry.part.mesh.pts);
+    });
+  }
+
+  function viewValues() {
+    if (!view.ready) return;
+    var gl = view.gl;
+    view.parts.forEach(function (entry) {
+      if (!entry.part.values) return;
+      gl.bindBuffer(gl.ARRAY_BUFFER, entry.value);
+      gl.bufferData(gl.ARRAY_BUFFER, entry.part.values, gl.STATIC_DRAW);
+    });
+  }
+
+  function viewDraw() {
+    if (!view.ready || !view.parts.length) return;
+    var gl = view.gl;
+    var canvas = view.canvas;
+    var ratio = window.devicePixelRatio || 1;
+    var width = Math.max(1, Math.round(canvas.clientWidth * ratio));
+    var height = Math.max(1, Math.round(canvas.clientHeight * ratio));
+    if (canvas.width !== width || canvas.height !== height) {
+      canvas.width = width;
+      canvas.height = height;
+    }
+    var mvp = viewMatrix(width, height);
+    if (!mvp) return;
+    view.mvp = mvp;
+    gl.viewport(0, 0, width, height);
+    gl.clearColor(0.02, 0.03, 0.04, 1);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    gl.useProgram(view.program);
+    var picked = thresholdFor(styleEntry());
+    gl.uniformMatrix4fv(view.uniforms.uMVP, false, mvp);
+    gl.uniform1f(view.uniforms.uThreshold, picked ? picked.floor : 0);
+    gl.uniform1f(view.uniforms.uWindow, windowMax());
+    gl.uniform1f(view.uniforms.uMapOpacity, el.opacity.value / 100);
+    gl.uniform1f(view.uniforms.uFade, state.blend === "soft" ? 1 : 0);
+    gl.uniform1f(view.uniforms.uCurvature, state.curvature);
+    gl.uniform1f(view.uniforms.uRoiOpacity, el["roi-opacity"].value / 100);
+    gl.uniform1i(view.uniforms.uHasOverlay, view.overlaySize ? 1 : 0);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, view.ramp);
+    gl.uniform1i(view.uniforms.uRamp, 0);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, view.overlay);
+    gl.uniform1i(view.uniforms.uOverlay, 1);
+    view.parts.forEach(function (entry) {
+      if (!entry.indexCount) return;
+      gl.bindVertexArray(entry.vao);
+      gl.drawElements(gl.TRIANGLES, entry.indexCount, gl.UNSIGNED_INT, 0);
+    });
+    gl.bindVertexArray(null);
+  }
+
+  // ---- the region drawing ----------------------------------------------------
+  // Outlines are drawn once, as curves, into a picture of the flattened
+  // cortex, and the surface samples that picture wherever it is. However the
+  // sheet folds, the line stays exactly on the region and exactly as smooth as
+  // it was drawn, which is what the mesh-bound attempts could never manage.
+  function drawRegionTexture() {
+    if (!view.ready) return;
+    var gl = view.gl;
+    var selection = surfaceSelection();
+    if (!selection.length || !surfaceParts.length) {
+      view.overlaySize = 0;
+      gl.bindTexture(gl.TEXTURE_2D, view.overlay);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA,
+        gl.UNSIGNED_BYTE, new Uint8Array([0, 0, 0, 0]));
+      return;
+    }
+    var narrow = window.matchMedia("(max-width: 760px)").matches;
+    var size = narrow ? 2048 : 4096;
+    var canvas = view.overlayCanvas;
+    if (!canvas || canvas.width !== size) {
+      canvas = document.createElement("canvas");
+      canvas.width = size;
+      canvas.height = size / 2;
+      view.overlayCanvas = canvas;
+    }
+    var context = canvas.getContext("2d");
+    context.clearRect(0, 0, canvas.width, canvas.height);
+    context.lineJoin = "round";
+    context.lineCap = "round";
+    surfaceParts.forEach(function (part) {
+      var flat = part.geometries.flat;
+      if (!flat || !part.regions) return;
+      var place = flatPlacement(part);
+      var half = canvas.width / 2;
+      var originX = part.hemisphere === "lh" ? 0 : half;
+      var pixelsPerMM = half * place.scale;
+      part.regions.forEach(function (region) {
+        region.loops.forEach(function (loop) {
+          if (loop.length < 8) return;
+          var points = new Float32Array(loop.length * 2);
+          var widths = new Float32Array(loop.length);
+          var i;
+          for (i = 0; i < loop.length; i += 1) {
+            var v = loop[i] * 3;
+            var unit = flatUnit(place, flat[v + 2], flat[v + 1]);
+            points[i * 2] = originX + unit[0] * half;
+            points[i * 2 + 1] = canvas.height - unit[1] * canvas.height;
+          }
+          // A line of one width in the flattened picture is not one width on
+          // the folded surface: flattening stretches some cortex and squeezes
+          // other cortex. The correction is how far the loop travels on the
+          // geometry showing against how far it travels in the flat map --
+          // but measured over a window of the path, not step by step. A
+          // single step compares two edges whose lengths differ for reasons
+          // that have nothing to do with the metric, and using that ratio
+          // modulates the line by noise: measured here, step ratios spread
+          // 0.5 to 1.65 around a median of 1.1, while the real distortion is
+          // smooth.
+          var pts = part.mesh.pts;
+          var steps = loop.length;
+          var flatSteps = new Float32Array(steps);
+          var geomSteps = new Float32Array(steps);
+          for (i = 0; i < steps; i += 1) {
+            var here = loop[i] * 3;
+            var next = loop[(i + 1) % steps] * 3;
+            var fdx = flat[next + 2] - flat[here + 2];
+            var fdy = flat[next + 1] - flat[here + 1];
+            flatSteps[i] = Math.sqrt(fdx * fdx + fdy * fdy);
+            var gdx = pts[next] - pts[here];
+            var gdy = pts[next + 1] - pts[here + 1];
+            var gdz = pts[next + 2] - pts[here + 2];
+            geomSteps[i] = Math.sqrt(gdx * gdx + gdy * gdy + gdz * gdz);
+          }
+          var window = Math.max(6, Math.round(steps / 12));
+          for (i = 0; i < steps; i += 1) {
+            var flatRun = 0, geomRun = 0;
+            for (var k = -window; k <= window; k += 1) {
+              var at = (i + k + steps * 2) % steps;
+              flatRun += flatSteps[at];
+              geomRun += geomSteps[at];
+            }
+            var stretch = flatRun > 1e-4 ? geomRun / flatRun : 1;
+            stretch = Math.min(Math.max(stretch, 0.5), 2);
+            widths[i] = (state.outlineWidth / 2) * pixelsPerMM / stretch;
+          }
+          relaxPath(points, 4, 0.5);
+          relaxWidths(widths, 12);
+          fillBand(context, points, widths, pixelsPerMM);
+        });
+      });
+    });
+    gl.bindTexture(gl.TEXTURE_2D, view.overlay);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, canvas);
+    // The picture is four thousand pixels across and lands on a few hundred on
+    // screen, so every screen pixel covers several texels. Taking one bilinear
+    // sample of that leaves a thin line hit and miss -- solid here, broken and
+    // thin a few pixels along -- which reads as a line of wildly uneven width.
+    // Mipmaps average it down instead, and anisotropic filtering keeps it from
+    // smearing where the surface turns away.
+    gl.generateMipmap(gl.TEXTURE_2D);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    var anisotropy = gl.getExtension("EXT_texture_filter_anisotropic");
+    if (anisotropy) {
+      gl.texParameterf(gl.TEXTURE_2D, anisotropy.TEXTURE_MAX_ANISOTROPY_EXT,
+        Math.min(8, gl.getParameter(anisotropy.MAX_TEXTURE_MAX_ANISOTROPY_EXT)));
+    }
+    view.overlaySize = size;
+  }
+
+  // Neighbour averaging around the ring, to take the mesh's staircase out of
+  // the path before it is drawn as a curve.
+  function relaxPath(points, passes, weight) {
+    var count = points.length / 2;
+    if (count < 6) return;
+    var scratch = new Float32Array(points.length);
+    for (var pass = 0; pass < passes; pass += 1) {
+      for (var i = 0; i < count; i += 1) {
+        var previous = ((i - 1 + count) % count) * 2;
+        var next = ((i + 1) % count) * 2;
+        var here = i * 2;
+        scratch[here] = points[here] * (1 - weight) +
+          (points[previous] + points[next]) * 0.5 * weight;
+        scratch[here + 1] = points[here + 1] * (1 - weight) +
+          (points[previous + 1] + points[next + 1]) * 0.5 * weight;
+      }
+      points.set(scratch);
+    }
+  }
+
+  // The widths are smoothed the way the path is: an abrupt change of width
+  // reads as a kink in the line.
+  function relaxWidths(widths, passes) {
+    var count = widths.length;
+    if (count < 4) return;
+    var scratch = new Float32Array(count);
+    for (var pass = 0; pass < passes; pass += 1) {
+      for (var i = 0; i < count; i += 1) {
+        var previous = widths[(i - 1 + count) % count];
+        var next = widths[(i + 1) % count];
+        scratch[i] = widths[i] * 0.5 + (previous + next) * 0.25;
+      }
+      widths.set(scratch);
+    }
+  }
+
+  // Canvas strokes are one width for the whole path, so the band is a filled
+  // shape instead: the loop offset outwards and then back along its inside.
+  // The soft shadow under it is the drop shadow pycortex's overlays carry,
+  // which reads as depth rather than as a second, harder line.
+  function fillBand(context, points, widths, pixelsPerMM) {
+    var count = points.length / 2;
+    if (count < 4) return;
+    var sides = new Float32Array(count * 2);
+    for (var i = 0; i < count; i += 1) {
+      var previous = ((i - 1 + count) % count) * 2;
+      var next = ((i + 1) % count) * 2;
+      var tx = points[next] - points[previous];
+      var ty = points[next + 1] - points[previous + 1];
+      var length = Math.sqrt(tx * tx + ty * ty) || 1;
+      sides[i * 2] = -ty / length;
+      sides[i * 2 + 1] = tx / length;
+    }
+    function ring(sign) {
+      for (var i = 0; i <= count; i += 1) {
+        var at = (i % count) * 2;
+        var x = points[at] + sides[at] * widths[i % count] * sign;
+        var y = points[at + 1] + sides[at + 1] * widths[i % count] * sign;
+        if (i === 0) context.moveTo(x, y); else context.lineTo(x, y);
+      }
+    }
+    context.save();
+    context.beginPath();
+    ring(1);
+    context.closePath();
+    for (var back = count; back >= 0; back -= 1) {
+      var at = (back % count) * 2;
+      var x = points[at] - sides[at] * widths[back % count];
+      var y = points[at + 1] - sides[at + 1] * widths[back % count];
+      if (back === count) context.moveTo(x, y); else context.lineTo(x, y);
+    }
+    context.closePath();
+    context.shadowColor = "rgba(0, 0, 0, 0.62)";
+    context.shadowBlur = Math.max(2, state.outlineWidth * pixelsPerMM * 0.9);
+    context.fillStyle = "rgba(255, 255, 255, 0.97)";
+    context.fill("evenodd");
+    context.shadowBlur = Math.max(1, state.outlineWidth * pixelsPerMM * 0.45);
+    context.fill("evenodd");
+    context.restore();
+  }
+
+  function strokeCurve(context, points) {
+    var count = points.length / 2;
+    context.beginPath();
+    var startX = (points[0] + points[(count - 1) * 2]) / 2;
+    var startY = (points[1] + points[(count - 1) * 2 + 1]) / 2;
+    context.moveTo(startX, startY);
+    for (var i = 0; i < count; i += 1) {
+      var next = ((i + 1) % count) * 2;
+      var midX = (points[i * 2] + points[next]) / 2;
+      var midY = (points[i * 2 + 1] + points[next + 1]) / 2;
+      context.quadraticCurveTo(points[i * 2], points[i * 2 + 1], midX, midY);
+    }
+    context.closePath();
+    context.stroke();
+  }
+
+  // ---- morphing --------------------------------------------------------------
+  function morphLabel(value) {
+    var index = Math.round(value);
+    if (Math.abs(value - index) < 0.02) return GEOMETRY_LABELS[GEOMETRY_ORDER[index]];
+    var low = Math.floor(value);
+    return GEOMETRY_LABELS[GEOMETRY_ORDER[low]] + " → " +
+      GEOMETRY_LABELS[GEOMETRY_ORDER[low + 1]];
+  }
+
+  // The flat geometry drops the faces that crossed the medial wall, so the
+  // mask says which of the base faces survive.
+  function maskedFaces(tris, mask) {
+    var kept = 0, i = 0;
+    for (i = 0; i < mask.length; i += 1) if (mask[i]) kept += 1;
+    var out = new Uint32Array(kept * 3);
+    var w = 0;
+    for (i = 0; i < mask.length; i += 1) {
+      if (!mask[i]) continue;
+      out[w] = tris[i * 3];
+      out[w + 1] = tris[i * 3 + 1];
+      out[w + 2] = tris[i * 3 + 2];
+      w += 3;
+    }
+    return out;
+  }
+
+  // Opening the hemispheres is a rotation about a vertical axis through the
+  // occipital pole, so the visual cortex stays put and the frontal poles swing
+  // apart -- and a quarter turn lands them in the arrangement pycortex lays a
+  // pair of flat maps out in.
+  var OPEN_ANGLE = Math.PI / 2;
+
+  function hemisphereSign(hemisphere) {
+    return hemisphere === "lh" ? 1 : -1;
+  }
+
+  function swing(vertices, angle, px, py, out) {
+    var ca = Math.cos(angle), sa = Math.sin(angle);
+    for (var i = 0; i < vertices.length; i += 3) {
+      var dx = vertices[i] - px, dy = vertices[i + 1] - py;
+      out[i] = px + dx * ca - dy * sa;
+      out[i + 1] = py + dx * sa + dy * ca;
+      out[i + 2] = vertices[i + 2];
+    }
+  }
+
+  function occipitalPivot(part) {
+    var wm = part.geometries.wm;
+    if (!wm) return [0, 0];
+    var best = 0;
+    for (var v = 1; v < wm.length / 3; v += 1) {
+      if (wm[v * 3 + 1] < wm[best * 3 + 1]) best = v;
+    }
+    return [wm[best * 3], wm[best * 3 + 1]];
+  }
+
+  // Vertex arrays are views over the fetch cache's buffers, so the guard is
+  // keyed on the buffer: a path whose buffer was evicted and refetched must be
+  // prepared again, or the flat map stays unrotated and vanishes edge on.
+  var preparedFlat = new WeakSet();
+
+  function prepareFlat(part) {
+    var flat = part.geometries.flat;
+    if (!flat || preparedFlat.has(flat.buffer)) return;
+    var pivot = part.pivot;
+    var sign = hemisphereSign(part.hemisphere);
+    var standing = new Float32Array(flat.length);
+    for (var i = 0; i < flat.length; i += 3) {
+      standing[i] = flat[i];
+      standing[i + 1] = 0;
+      standing[i + 2] = flat[i + 1];
+    }
+    swing(standing, -sign * OPEN_ANGLE, pivot[0], pivot[1], flat);
+    preparedFlat.add(flat.buffer);
+  }
+
+  // Everything the sliders drive is eased rather than applied.
+  var anim = { morph: 2, split: 0, frame: null, last: 0 };
+  var EASE_SECONDS = 0.45;
+
+  function requestSurfaceFrame() {
+    if (anim.frame !== null || !surfaceParts.length) return;
+    anim.last = 0;
+    anim.frame = window.requestAnimationFrame(surfaceFrame);
+  }
+
+  function surfaceFrame(now) {
+    anim.frame = null;
+    var elapsed = anim.last ? Math.min((now - anim.last) / 1000, 0.1) : 1 / 60;
+    anim.last = now;
+    var EASE = 1 - Math.exp(-elapsed / EASE_SECONDS);
+    var dm = state.morph - anim.morph;
+    var ds = state.split - anim.split;
+    if (Math.abs(dm) < 0.0008 && Math.abs(ds) < 0.0008) {
+      anim.morph = state.morph;
+      anim.split = state.split;
+      applyMorph();
+      // The outline picture is drawn for whichever geometry is showing, so it
+      // is redrawn once the motion stops rather than on every frame.
+      drawRegionTexture();
+      viewDraw();
+      return;
+    }
+    anim.morph += dm * EASE;
+    anim.split += ds * EASE;
+    applyMorph();
+    if (anim.frame === null) anim.frame = window.requestAnimationFrame(surfaceFrame);
+  }
+
+  function flatWeightFor(value) {
+    return Math.max(0, Math.min(1, value - 2));
+  }
+
+  // A flat map has to be fully open to be readable, so flatness floors the
+  // opening; below that the reader's own setting stands.
+  function effectiveSplit() {
+    return Math.max(anim.split, flatWeightFor(anim.morph));
+  }
+
+  function applyMorph() {
+    if (!surfaceParts.length) return;
+    var value = Math.max(0, Math.min(3, anim.morph));
+    var low = Math.min(2, Math.floor(value));
+    var t = value - low;
+    var fromName = GEOMETRY_ORDER[low];
+    var toName = GEOMETRY_ORDER[low + 1];
+    var split = effectiveSplit();
+    var angle = OPEN_ANGLE * split;
+
+    surfaceParts.forEach(function (part) {
+      var from = part.geometries[fromName] || part.geometries.wm;
+      var to = part.geometries[toName] || from;
+      var sign = hemisphereSign(part.hemisphere);
+      var ca = Math.cos(angle * sign), sa = Math.sin(angle * sign);
+      var px = part.pivot[0], py = part.pivot[1];
+      var pts = part.mesh.pts;
+      var lo = [Infinity, Infinity, Infinity];
+      var hi = [-Infinity, -Infinity, -Infinity];
+      for (var i = 0; i < pts.length; i += 3) {
+        var x = from[i] + (to[i] - from[i]) * t - px;
+        var y = from[i + 1] + (to[i + 1] - from[i + 1]) * t - py;
+        var z = from[i + 2] + (to[i + 2] - from[i + 2]) * t;
+        var rx = px + x * ca - y * sa;
+        var ry = py + x * sa + y * ca;
+        pts[i] = rx; pts[i + 1] = ry; pts[i + 2] = z;
+        if (rx < lo[0]) lo[0] = rx; if (rx > hi[0]) hi[0] = rx;
+        if (ry < lo[1]) lo[1] = ry; if (ry > hi[1]) hi[1] = ry;
+        if (z < lo[2]) lo[2] = z; if (z > hi[2]) hi[2] = z;
+      }
+      part.bounds = { lo: lo, hi: hi };
+    });
+
+    // Whatever the angle, the two hemispheres may not occupy the same space:
+    // pycortex centres inflated and flat geometries on the origin.
+    var left = surfaceParts.filter(function (p) { return p.hemisphere === "lh"; })[0];
+    var right = surfaceParts.filter(function (p) { return p.hemisphere === "rh"; })[0];
+    var shift = 0;
+    if (left && right) {
+      var overlap = left.bounds.hi[0] - right.bounds.lo[0];
+      if (overlap > -2) shift = (overlap + 2) / 2;
+    }
+    surfaceParts.forEach(function (part) {
+      var offset = -hemisphereSign(part.hemisphere) * shift;
+      if (!offset) return;
+      var pts = part.mesh.pts;
+      for (var i = 0; i < pts.length; i += 3) pts[i] += offset;
+      part.bounds.lo[0] += offset;
+      part.bounds.hi[0] += offset;
+    });
+
+    geometryVersion += 1;
+    orientCamera();
+    viewIndices();
+    viewPositions();
+    viewDraw();
+    el["morph-value"].textContent = morphLabel(value);
+  }
+
+  // Only flattening moves the camera, and then only from wherever the reader
+  // last left it towards the view a flat map is meant to be seen from.
+  var cameraSplit = null;
+  var cameraHeld = { azimuth: 110, elevation: 10 };
+
+  function orientCamera() {
+    var flatness = flatWeightFor(anim.morph);
+    if (cameraSplit === null || Math.abs(flatness - cameraSplit) > 1e-4) {
+      var held = cameraSplit === null ? { azimuth: 110, elevation: 10 } : cameraHeld;
+      // Azimuth and elevation both zero is the view the opened sheets face:
+      // the camera looks along the surface normal of a flat map, with world
+      // +x to the right and +z up -- left hemisphere left, dorsal at the top.
+      // Azimuth wraps, so the sweep goes whichever way round is shorter;
+      // interpolating the raw numbers sends a view from behind the brain the
+      // long way round, a full turn for one degree of difference.
+      var turn = ((0 - held.azimuth + 540) % 360) - 180;
+      state.azimuth = held.azimuth + turn * flatness;
+      state.elevation = held.elevation * (1 - flatness);
+      cameraSplit = flatness;
+    } else if (flatness < 0.001) {
+      cameraHeld = { azimuth: state.azimuth, elevation: state.elevation };
+    }
+  }
+
+  // A flat map has no meaningful rotation, so dragging it pans instead.
+  function rotationLocked() {
+    return state.mode === "surface" && flatWeightFor(anim.morph) > 0.999;
+  }
+
+  // ---- regions ---------------------------------------------------------------
+  function surfaceRegionNames() {
+    var record = surfaceRecord();
+    return record ? Object.keys(record.rois || {}) : [];
+  }
+
+  function surfaceSelection() {
+    return surfaceRegionNames().filter(function (name) {
+      return state.surfaceRegions[name];
+    }).sort(function (a, b) {
+      return regionSortKey(a) < regionSortKey(b) ? -1 : 1;
+    });
+  }
+
+  // pycortex indexes ROI vertices into the two hemispheres end to end.
+  function leftVertexCount() {
+    var record = surfaceRecord();
+    var left = record && record.hemispheres.lh;
+    return left ? left.n_vertices : 0;
+  }
+
+  function loadRegionVertices(name) {
+    var record = surfaceRecord();
+    var roi = record && (record.rois || {})[name];
+    if (!roi) return Promise.resolve(null);
+    return fetchBinary(roi.path).then(function (buffer) {
+      return new Uint32Array(buffer);
+    });
+  }
+
+  // The outline of a region is the set of edges belonging to exactly one of
+  // its faces, chained into closed loops.
+  function boundaryLoops(part, inside) {
+    var tris = part.baseTris;
+    var counts = new Map();
+    var f, key, low, high;
+    for (f = 0; f < tris.length; f += 3) {
+      var a = tris[f], b = tris[f + 1], c = tris[f + 2];
+      if (!inside[a] || !inside[b] || !inside[c]) continue;
+      var pairs = [[a, b], [b, c], [c, a]];
+      for (var e = 0; e < 3; e += 1) {
+        low = Math.min(pairs[e][0], pairs[e][1]);
+        high = Math.max(pairs[e][0], pairs[e][1]);
+        key = low * 4294967296 + high;
+        counts.set(key, (counts.get(key) || 0) + 1);
+      }
+    }
+    var links = new Map();
+    function link(from, to) {
+      var list = links.get(from);
+      if (!list) { list = []; links.set(from, list); }
+      list.push(to);
+    }
+    var used = new Set();
+    counts.forEach(function (count, edge) {
+      if (count !== 1) return;
+      var second = edge % 4294967296;
+      var first = (edge - second) / 4294967296;
+      link(first, second);
+      link(second, first);
+    });
+    var loops = [];
+    links.forEach(function (neighbours, start) {
+      neighbours.forEach(function (first) {
+        var mark = Math.min(start, first) * 4294967296 + Math.max(start, first);
+        if (used.has(mark)) return;
+        used.add(mark);
+        var loop = [start];
+        var current = first, previous = start;
+        while (current !== undefined && current !== start && loop.length < 20000) {
+          loop.push(current);
+          var options = links.get(current) || [];
+          var step;
+          for (var i = 0; i < options.length; i += 1) {
+            var candidate = options[i];
+            if (candidate === previous) continue;
+            var edgeKey = Math.min(current, candidate) * 4294967296 +
+                          Math.max(current, candidate);
+            if (used.has(edgeKey)) continue;
+            step = candidate;
+            used.add(edgeKey);
+            break;
+          }
+          previous = current;
+          current = step;
+        }
+        if (loop.length >= 12) loops.push(new Uint32Array(loop));
+      });
+    });
+    return loops;
+  }
+
+  // The vertex closest to the region's centre of mass, which gives the label
+  // somewhere fixed to sit.
+  function regionAnchor(part, inside) {
+    var pts = part.mesh.pts;
+    var count = inside.length;
+    var sx = 0, sy = 0, sz = 0, n = 0, v;
+    for (v = 0; v < count; v += 1) {
+      if (!inside[v]) continue;
+      sx += pts[v * 3]; sy += pts[v * 3 + 1]; sz += pts[v * 3 + 2];
+      n += 1;
+    }
+    if (!n) return 0;
+    sx /= n; sy /= n; sz /= n;
+    var best = -1, bestDistance = Infinity;
+    for (v = 0; v < count; v += 1) {
+      if (!inside[v]) continue;
+      var dx = pts[v * 3] - sx, dy = pts[v * 3 + 1] - sy, dz = pts[v * 3 + 2] - sz;
+      var distance = dx * dx + dy * dy + dz * dz;
+      if (distance < bestDistance) { bestDistance = distance; best = v; }
+    }
+    return best < 0 ? 0 : best;
+  }
+
+  function regionSample(inside, limit) {
+    var all = [];
+    for (var v = 0; v < inside.length; v += 1) if (inside[v]) all.push(v);
+    if (all.length <= limit) return new Uint32Array(all);
+    var step = all.length / limit;
+    var picked = new Uint32Array(limit);
+    for (var i = 0; i < limit; i += 1) picked[i] = all[Math.floor(i * step)];
+    return picked;
+  }
+
+  var surfaceRegionToken = 0;
+
+  function paintSurfaceRegions() {
+    if (!surfaceParts.length) return Promise.resolve();
+    var selection = surfaceSelection();
+    var token = ++surfaceRegionToken;
+    if (!selection.length) {
+      surfaceParts.forEach(function (part) {
+        part.regions = [];
+        part.membership = null;
+      });
+      drawRegionTexture();
+      viewDraw();
+      drawAnnotations(true);
+      return Promise.resolve();
+    }
+    return Promise.all(selection.map(loadRegionVertices)).then(function (sets) {
+      if (token !== surfaceRegionToken) return;
+      var split = leftVertexCount();
+      surfaceParts.forEach(function (part) {
+        var count = part.mesh.pts.length / 3;
+        var offset = part.hemisphere === "lh" ? 0 : split;
+        var membership = {};
+        var regions = [];
+        sets.forEach(function (vertices, index) {
+          if (!vertices) return;
+          var inside = new Uint8Array(count);
+          var hit = 0;
+          for (var i = 0; i < vertices.length; i += 1) {
+            var v = vertices[i] - offset;
+            if (v >= 0 && v < count) { inside[v] = 1; hit += 1; }
+          }
+          if (!hit) return;
+          membership[selection[index]] = inside;
+          var loops = boundaryLoops(part, inside);
+          if (!loops.length) return;
+          regions.push({
+            name: selection[index],
+            colour: colourOf("surface:" + selection[index]),
+            loops: loops,
+            anchor: regionAnchor(part, inside),
+            sample: regionSample(inside, 400)
+          });
+        });
+        part.membership = membership;
+        part.regions = regions;
+      });
+      drawRegionTexture();
+      viewDraw();
+      drawAnnotations(true);
+    });
+  }
+
+  // ---- labels and crosshair --------------------------------------------------
+  var lastMatrix = null;
+  var lastLabels = [];
+  var markerAt = null;
+  var geometryVersion = 0;
+  var lastGeometryVersion = -1;
+
+  function annotationContext() {
+    var canvas = el.annotations;
+    var stage = canvas.parentElement;
+    var ratio = window.devicePixelRatio || 1;
+    var width = Math.round(stage.clientWidth * ratio);
+    var height = Math.round(stage.clientHeight * ratio);
+    if (canvas.width !== width || canvas.height !== height) {
+      canvas.width = width;
+      canvas.height = height;
+    }
+    var context = canvas.getContext("2d");
+    context.clearRect(0, 0, width, height);
+    return context;
+  }
+
+  // Both canvases cover the stage at the same scale, so a point projected into
+  // one lands in the other. Nothing here goes through devicePixelRatio twice,
+  // which is what put the labels a factor away from the surface on a display
+  // scaled past 100%.
+  function projector(mvp, width, height) {
+    return function (pts, index) {
+      var x = pts[index * 3], y = pts[index * 3 + 1], z = pts[index * 3 + 2];
+      var w = mvp[3] * x + mvp[7] * y + mvp[11] * z + mvp[15];
+      if (!w) return null;
+      return [
+        ((mvp[0] * x + mvp[4] * y + mvp[8] * z + mvp[12]) / w * 0.5 + 0.5) * width,
+        (0.5 - (mvp[1] * x + mvp[5] * y + mvp[9] * z + mvp[13]) / w * 0.5) * height,
+        (mvp[2] * x + mvp[6] * y + mvp[10] * z + mvp[14]) / w
+      ];
+    };
+  }
+
+  var DEPTH_CELL = 4;
+  var depthGrid = { near: null, far: null, cols: 0, rows: 0, range: 1 };
+
+  function buildDepthGrid(project, width, height) {
+    var cols = Math.max(1, Math.ceil(width / DEPTH_CELL));
+    var rows = Math.max(1, Math.ceil(height / DEPTH_CELL));
+    if (!depthGrid.near || depthGrid.cols !== cols || depthGrid.rows !== rows) {
+      depthGrid.near = new Float32Array(cols * rows);
+      depthGrid.far = new Float32Array(cols * rows);
+      depthGrid.cols = cols;
+      depthGrid.rows = rows;
+    }
+    var near = depthGrid.near, far = depthGrid.far;
+    near.fill(Infinity);
+    far.fill(-Infinity);
+    var lowest = Infinity, highest = -Infinity;
+    surfaceParts.forEach(function (part) {
+      var pts = part.mesh.pts;
+      var count = pts.length / 3;
+      for (var v = 0; v < count; v += 2) {
+        var at = project(pts, v);
+        if (!at) continue;
+        var col = Math.floor(at[0] / DEPTH_CELL), row = Math.floor(at[1] / DEPTH_CELL);
+        if (col < 0 || row < 0 || col >= cols || row >= rows) continue;
+        var cell = row * cols + col;
+        if (at[2] < near[cell]) near[cell] = at[2];
+        if (at[2] > far[cell]) far[cell] = at[2];
+        if (at[2] < lowest) lowest = at[2];
+        if (at[2] > highest) highest = at[2];
+      }
+    });
+    depthGrid.range = isFinite(highest - lowest) ? Math.max(highest - lowest, 1e-6) : 1;
+  }
+
+  function depthVisible(at) {
+    var near = depthGrid.near;
+    if (!near || !at) return !!at;
+    var far = depthGrid.far;
+    var col = Math.floor(at[0] / DEPTH_CELL), row = Math.floor(at[1] / DEPTH_CELL);
+    var nearest = Infinity, furthest = -Infinity;
+    for (var dy = -1; dy <= 1; dy += 1) {
+      var r = row + dy;
+      if (r < 0 || r >= depthGrid.rows) continue;
+      for (var dx = -1; dx <= 1; dx += 1) {
+        var c = col + dx;
+        if (c < 0 || c >= depthGrid.cols) continue;
+        var cell = r * depthGrid.cols + c;
+        if (near[cell] < nearest) nearest = near[cell];
+        if (far[cell] > furthest) furthest = far[cell];
+      }
+    }
+    if (!isFinite(nearest)) return true;
+    var relief = Math.min(furthest - nearest, depthGrid.range * 0.05);
+    return at[2] <= nearest + relief * 0.75 + depthGrid.range * 0.002;
+  }
+
+  // Hairlines the width of the view with a small ring at the point: it says
+  // where without hiding what is there.
+  function drawCrosshair(context, project) {
+    if (!markerAt) return;
+    var part = markerAt.part;
+    if (surfaceParts.indexOf(part) === -1) return;
+    var at = project(part.mesh.pts, markerAt.vertex);
+    if (!at) return;
+    var ratio = window.devicePixelRatio || 1;
+    context.save();
+    context.lineWidth = Math.max(1, ratio * 0.75);
+    context.strokeStyle = "rgba(122, 214, 255, 0.45)";
+    context.beginPath();
+    context.moveTo(0, at[1]);
+    context.lineTo(context.canvas.width, at[1]);
+    context.moveTo(at[0], 0);
+    context.lineTo(at[0], context.canvas.height);
+    context.stroke();
+    context.beginPath();
+    context.arc(at[0], at[1], 5 * ratio, 0, Math.PI * 2);
+    context.strokeStyle = "rgba(122, 214, 255, 0.9)";
+    context.stroke();
+    context.restore();
+  }
+
+  function drawAnnotations(force) {
+    if (state.mode !== "surface" || !surfaceParts.length || !view.mvp) {
+      if (el.annotations.width) annotationContext();
+      lastMatrix = null;
+      return;
+    }
+    var m = view.mvp;
+    var settling = surfaceParts.some(function (part) {
+      return (part.regions || []).some(function (region) {
+        return region.labelAlpha !== undefined && region.target !== undefined &&
+          Math.abs(region.labelAlpha - region.target) > 0.01;
+      });
+    });
+    if (!force && !settling && lastMatrix && lastGeometryVersion === geometryVersion) {
+      var same = true;
+      for (var i = 0; i < 16; i += 1) {
+        if (Math.abs(m[i] - lastMatrix[i]) > 1e-7) { same = false; break; }
+      }
+      if (same) return;
+    }
+    lastMatrix = Array.prototype.slice.call(m);
+    lastGeometryVersion = geometryVersion;
+    var context = annotationContext();
+    var project = projector(m, context.canvas.width, context.canvas.height);
+    buildDepthGrid(project, context.canvas.width, context.canvas.height);
+    var strength = Math.sqrt(el["roi-opacity"].value / 100);
+    var labels = [];
+    surfaceParts.forEach(function (part) {
+      (part.regions || []).forEach(function (region) {
+        var seen = 0;
+        for (var s = 0; s < region.sample.length; s += 1) {
+          if (depthVisible(project(part.mesh.pts, region.sample[s]))) seen += 1;
+        }
+        var showing = region.sample.length ? seen / region.sample.length : 0;
+        var anchor = project(part.mesh.pts, region.anchor);
+        if (anchor && !depthVisible(anchor)) showing *= 0.35;
+        var target = Math.min(1, Math.max(0, (showing - 0.06) / 0.28));
+        region.target = target;
+        region.labelAlpha = region.labelAlpha === undefined
+          ? target : region.labelAlpha + (target - region.labelAlpha) * 0.25;
+        region.visible = showing;
+        if (anchor && region.labelAlpha > 0.02) {
+          labels.push({
+            text: region.name, hemisphere: part.hemisphere,
+            x: anchor[0], y: anchor[1], colour: region.colour,
+            alpha: region.labelAlpha * (0.45 + 0.55 * strength)
+          });
+        }
+      });
+    });
+    drawCrosshair(context, project);
+    lastLabels = labels;
+    var ratio = window.devicePixelRatio || 1;
+    context.font = "600 " + Math.round(13 * ratio) + 'px "IBM Plex Mono", ui-monospace, monospace';
+    context.textAlign = "center";
+    context.textBaseline = "middle";
+    labels.forEach(function (label) {
+      context.lineWidth = 3.5 * ratio;
+      context.strokeStyle = "rgba(10,14,20," + (0.9 * label.alpha).toFixed(3) + ")";
+      context.strokeText(label.text, label.x, label.y);
+      context.fillStyle = "rgba(245, 248, 252," + label.alpha.toFixed(3) + ")";
+      context.fillText(label.text, label.x, label.y);
+    });
+  }
+
+  function watchAnnotations() {
+    function tick() {
+      try { drawAnnotations(false); } catch (ignored) {}
+      window.requestAnimationFrame(tick);
+    }
+    window.requestAnimationFrame(tick);
+  }
+
+  // ---- picking ---------------------------------------------------------------
+  function renderMatrix() {
+    return { mvp: view.mvp, box: [0, 0, el.annotations.width, el.annotations.height] };
+  }
+
+  function canvasPoint(event) {
+    var canvas = view.canvas || el.annotations;
+    var rect = canvas.getBoundingClientRect();
+    var scale = el.annotations.width / Math.max(rect.width, 1);
+    return [(event.clientX - rect.left) * scale, (event.clientY - rect.top) * scale];
+  }
+
+  function pickVertex(event) {
+    if (!surfaceParts.length || !view.mvp) return null;
+    var where = canvasPoint(event);
+    var project = projector(view.mvp, el.annotations.width, el.annotations.height);
+    var reach = 12 * (window.devicePixelRatio || 1);
+    var candidates = [];
+    var nearest = Infinity;
+    surfaceParts.forEach(function (part) {
+      var pts = part.mesh.pts;
+      var count = pts.length / 3;
+      for (var v = 0; v < count; v += 1) {
+        var at = project(pts, v);
+        if (!at) continue;
+        var dx = at[0] - where[0], dy = at[1] - where[1];
+        var distance = dx * dx + dy * dy;
+        if (distance > reach * reach) continue;
+        if (at[2] < nearest) nearest = at[2];
+        candidates.push({ part: part, vertex: v, depth: at[2], distance: distance });
+      }
+    });
+    if (!candidates.length) return null;
+    var band = nearest + 0.02;
+    var best = null;
+    candidates.forEach(function (candidate) {
+      if (candidate.depth > band) return;
+      if (!best || candidate.distance < best.distance) best = candidate;
+    });
+    return best;
+  }
+
+  function markVertex(part, vertex) {
+    markerAt = { part: part, vertex: vertex };
+    drawAnnotations(true);
+  }
+
+  function surfaceRegionsAt(part, vertex) {
+    if (!part.membership) return [];
+    var names = [];
+    Object.keys(part.membership).forEach(function (name) {
+      if (part.membership[name][vertex]) names.push(name);
+    });
+    return names;
+  }
+
+  function reportPick(hit) {
+    if (!hit) return;
+    var part = hit.part;
+    var anatomical = part.geometries.wm;
+    var v = hit.vertex;
+    var mm = anatomical
+      ? [anatomical[v * 3], anatomical[v * 3 + 1], anatomical[v * 3 + 2]]
+      : null;
+    var value = part.values ? part.values[v] : null;
+    el.coords.textContent = mm
+      ? mm.map(function (c) { return c.toFixed(1); }).join(", ") + " mm"
+      : "vertex " + v;
+    el["voxel-value"].textContent = value === null ? "—" : format(value);
+    var names = surfaceRegionsAt(part, v);
+    el["roi-readout"].textContent = names.length
+      ? "region " + names.join(", ")
+      : part.hemisphere + " vertex " + v;
+    markVertex(part, v);
+  }
+
+  // ---- navigation ------------------------------------------------------------
+  // One pixel of drag is worth this much of the scene, which is what makes
+  // the surface track the pointer exactly.
+  function shiftPan(dxPixels, dyPixels) {
+    var canvas = view.canvas;
+    if (!canvas || !view.halfHeight) return;
+    var perPixel = (2 * view.halfHeight) / Math.max(canvas.clientHeight, 1);
+    state.surfacePan[0] += dxPixels * perPixel;
+    state.surfacePan[1] -= dyPixels * perPixel;
+  }
+
+  var touchState = { multiAt: 0 };
+
+  function measureTouches(touches) {
+    var dx = touches[1].clientX - touches[0].clientX;
+    var dy = touches[1].clientY - touches[0].clientY;
+    return {
+      x: (touches[0].clientX + touches[1].clientX) / 2,
+      y: (touches[0].clientY + touches[1].clientY) / 2,
+      spread: Math.sqrt(dx * dx + dy * dy)
+    };
+  }
+
+  function canvasMM(instance, canvas, clientX, clientY) {
+    try {
+      var rect = canvas.getBoundingClientRect();
+      var dpr = canvas.width / Math.max(rect.width, 1);
+      var frac = instance.canvasPos2frac([
+        (clientX - rect.left) * dpr, (clientY - rect.top) * dpr
+      ]);
+      if (!frac || frac[0] < 0) return null;
+      return instance.frac2mm(frac);
+    } catch (ignored) {
+      return null;
+    }
+  }
+
+  // Pinch and slide on a slice view. NiiVue's own pinch routes through
+  // sliceScroll2D, which this viewer disables by requiring canvas focus for
+  // scroll, and there is no two-finger pan at all.
+  function volumeGesture(instance, canvas, now, before) {
+    var pan = Array.prototype.slice.call(instance.scene.pan2Dxyzmm);
+    var zoom = pan[3] || 1;
+    if (before.spread > 4 && now.spread > 4) {
+      var next = Math.min(Math.max(zoom * (now.spread / before.spread), 0.4), 10);
+      var crosshair = instance.frac2mm(instance.scene.crosshairPos);
+      var shift = zoom - next;
+      pan[0] += shift * crosshair[0];
+      pan[1] += shift * crosshair[1];
+      pan[2] += shift * crosshair[2];
+      pan[3] = next;
+      zoom = next;
+    }
+    var from = canvasMM(instance, canvas, before.x, before.y);
+    var to = canvasMM(instance, canvas, now.x, now.y);
+    if (from && to) {
+      pan[0] += zoom * (to[0] - from[0]);
+      pan[1] += zoom * (to[1] - from[1]);
+      pan[2] += zoom * (to[2] - from[2]);
+    }
+    instance.scene.pan2Dxyzmm = pan;
+    instance.drawScene();
+  }
+
+  // Two fingers pinch and slide on a slice view; one finger tapped moves the
+  // crosshair, which NiiVue only does for a touch that drags.
+  function wireTouchGestures(instance, canvas) {
+    var gesture = null;
+    var tap = null;
+    canvas.addEventListener("touchstart", function (event) {
+      if (event.touches.length > 1) { touchState.multiAt = Date.now(); tap = null; }
+      gesture = event.touches.length === 2 ? measureTouches(event.touches) : null;
+      tap = event.touches.length === 1
+        ? { x: event.touches[0].clientX, y: event.touches[0].clientY, at: Date.now() }
+        : null;
+    }, true);
+    canvas.addEventListener("touchmove", function (event) {
+      if (event.touches.length > 1) touchState.multiAt = Date.now();
+      if (event.touches.length !== 2) { gesture = null; return; }
+      var now = measureTouches(event.touches);
+      if (gesture) volumeGesture(instance, canvas, now, gesture);
+      gesture = now;
+      event.preventDefault();
+      event.stopPropagation();
+    }, true);
+    ["touchend", "touchcancel"].forEach(function (name) {
+      canvas.addEventListener(name, function (event) {
+        if (event.touches.length < 2 && gesture) {
+          touchState.multiAt = Date.now();
+          gesture = null;
+        }
+        if (!tap || event.touches.length || !event.changedTouches.length) { tap = null; return; }
+        var end = event.changedTouches[0];
+        var dx = end.clientX - tap.x, dy = end.clientY - tap.y;
+        var quick = Date.now() - tap.at < 800;
+        tap = null;
+        if (Math.sqrt(dx * dx + dy * dy) > 12 || !quick) return;
+        var rect = canvas.getBoundingClientRect();
+        try { instance.mouseClick(end.clientX - rect.left, end.clientY - rect.top); } catch (ignored) {}
+      }, true);
+    });
+  }
+
+  // The surface has its own canvas, so its navigation is its own too: drag to
+  // turn, middle drag or a flat-map drag to pan, wheel or right drag to zoom,
+  // two fingers to pinch and slide.
+  function wireSurfaceNavigation() {
+    var canvas = el["surface-gl"];
+    var turning = null, panning = null, zooming = null;
+
+    canvas.addEventListener("contextmenu", function (event) { event.preventDefault(); });
+    canvas.addEventListener("pointerdown", function (event) {
+      if (state.mode !== "surface") return;
+      try { canvas.setPointerCapture(event.pointerId); } catch (ignored) {}
+      if (event.button === 2) zooming = [event.clientX, event.clientY];
+      else if (event.button === 1 || rotationLocked()) panning = [event.clientX, event.clientY];
+      else if (event.button === 0) turning = [event.clientX, event.clientY];
+      event.preventDefault();
+    });
+    canvas.addEventListener("pointermove", function (event) {
+      if (state.mode !== "surface") return;
+      if (turning) {
+        state.azimuth = (state.azimuth - (event.clientX - turning[0]) * 0.4 + 360) % 360;
+        state.elevation = Math.max(-89, Math.min(89,
+          state.elevation + (event.clientY - turning[1]) * 0.4));
+        cameraHeld = { azimuth: state.azimuth, elevation: state.elevation };
+        turning = [event.clientX, event.clientY];
+        viewDraw();
+      } else if (panning) {
+        shiftPan(event.clientX - panning[0], event.clientY - panning[1]);
+        panning = [event.clientX, event.clientY];
+        viewDraw();
+      } else if (zooming) {
+        var travel = (event.clientX - zooming[0]) + (zooming[1] - event.clientY);
+        state.surfaceZoom = Math.min(Math.max(state.surfaceZoom * Math.exp(travel * 0.006), 0.2), 12);
+        zooming = [event.clientX, event.clientY];
+        viewDraw();
+      }
+    });
+    ["pointerup", "pointercancel", "pointerleave"].forEach(function (name) {
+      canvas.addEventListener(name, function () {
+        turning = null; panning = null; zooming = null;
+      });
+    });
+    canvas.addEventListener("wheel", function (event) {
+      if (state.mode !== "surface") return;
+      state.surfaceZoom = Math.min(Math.max(
+        state.surfaceZoom * Math.exp(-event.deltaY * 0.0015), 0.2), 12);
+      viewDraw();
+      event.preventDefault();
+    }, { passive: false });
+
+    var gesture = null;
+    canvas.addEventListener("touchstart", function (event) {
+      if (event.touches.length > 1) touchState.multiAt = Date.now();
+      gesture = event.touches.length === 2 ? measureTouches(event.touches) : null;
+    }, true);
+    canvas.addEventListener("touchmove", function (event) {
+      if (event.touches.length > 1) touchState.multiAt = Date.now();
+      if (event.touches.length !== 2) { gesture = null; return; }
+      var now = measureTouches(event.touches);
+      if (gesture) {
+        if (gesture.spread > 4) {
+          state.surfaceZoom = Math.min(Math.max(
+            state.surfaceZoom * (now.spread / gesture.spread), 0.2), 12);
+        }
+        shiftPan(now.x - gesture.x, now.y - gesture.y);
+        viewDraw();
+      }
+      gesture = now;
+      event.preventDefault();
+      event.stopPropagation();
+    }, true);
+    ["touchend", "touchcancel"].forEach(function (name) {
+      canvas.addEventListener(name, function () {
+        if (gesture) touchState.multiAt = Date.now();
+        gesture = null;
+      }, true);
+    });
+  }
+
+  // A tap or a click that stayed put picks a vertex; a drag turns the brain.
+  function wireSurfacePicking() {
+    var canvas = el["surface-gl"];
+    var began = null;
+    canvas.addEventListener("pointerdown", function (event) {
+      if (state.mode !== "surface") { began = null; return; }
+      if (event.pointerType === "mouse" && event.button !== 0) { began = null; return; }
+      if (event.pointerType === "touch" && Date.now() - touchState.multiAt < 350) {
+        began = null;
+        return;
+      }
+      began = { id: event.pointerId, x: event.clientX, y: event.clientY, at: Date.now() };
+    }, true);
+    canvas.addEventListener("pointerup", function (event) {
+      var start = began;
+      began = null;
+      if (state.mode !== "surface" || !start || event.pointerId !== start.id) return;
+      var dx = event.clientX - start.x, dy = event.clientY - start.y;
+      if (Math.sqrt(dx * dx + dy * dy) > 12) return;
+      if (Date.now() - start.at > 800) return;
+      if (Date.now() - touchState.multiAt < 350) return;
+      reportPick(pickVertex(event));
+    }, true);
+  }
+
+  // ---- building --------------------------------------------------------------
+  function restyleSurface() {
+    viewDraw();
+  }
+
+  function refreshCurvature() {
+    viewDraw();
+  }
+
+  function buildSurface() {
+    var surfaces = state.manifest.surfaces || {};
+    if (state.surfaceSpace === "fsnative" && !surfaces[state.subject] && surfaces.fsaverage) {
+      state.surfaceSpace = "fsaverage";
+      setPressed(el["surface-spaces"], "data-surface-space", state.surfaceSpace);
+    }
+    var record = surfaceRecord();
+    el["surface-field"].hidden = false;
+    syncSurfaceSpaceButtons();
+    if (!record) {
+      el.loading.hidden = false;
+      el.loading.textContent = state.subject === "group"
+        ? "Surfaces are per subject; the group map has no anatomy to project onto. "
+          + "Pick a subject-level endpoint."
+        : "no surfaces exported for " + state.subject;
+      return;
+    }
+    if (!viewInit()) {
+      el.loading.hidden = false;
+      el.loading.textContent = "this browser cannot open a WebGL2 context for surfaces";
+      return;
+    }
+    var token = ++loadToken;
+    el.loading.hidden = false;
+    el.loading.textContent = "loading surfaces…";
+    teardownPanels();
+    var fsaverage = state.surfaceSpace === "fsaverage";
+    var entry = fsaverage ? currentMap() : subjectSpaceEntry();
+    if (!entry) {
+      el.loading.textContent = fsaverage
+        ? "this endpoint has no MNI map to project"
+        : "this endpoint has no subject-space map to project";
+      return;
+    }
+    var transform = fsaverage ? record.volume_transform : null;
+    viewRelease();
+    surfaceParts = [];
+    markerAt = null;
+    var wanted = ["lh", "rh"].filter(function (h) {
+      return state.hemispheres[h] && record.hemispheres[h];
+    });
+    Promise.all([
+      loadImage(entry.path),
+      // NiiVue's loader is the quickest way to unpack an mz3; the faces come
+      // out of it and the mesh itself is dropped straight away.
+      nv.loadMeshes(wanted.map(function (h) {
+        return { url: record.hemispheres[h].mesh };
+      }))
+    ]).then(function (results) {
+      if (token !== loadToken) return;
+      var image = results[0];
+      var sample = transformedSampler(volumeSampler(image), transform);
+      var meshes = nv.meshes.slice(0, wanted.length);
+      var faces = meshes.map(function (mesh) { return new Uint32Array(mesh.tris); });
+      while (nv.meshes.length) {
+        try { nv.removeMesh(nv.meshes[0]); } catch (ignored) { break; }
+      }
+      return Promise.all(wanted.map(function (hemisphere, index) {
+        var info = record.hemispheres[hemisphere];
+        var jobs = [];
+        var names = [];
+        GEOMETRY_ORDER.forEach(function (name) {
+          var geometry = info.geometries[name];
+          if (!geometry) return;
+          names.push(name);
+          jobs.push(fetchBinary(geometry.vertices));
+        });
+        var flat = info.geometries.flat || {};
+        jobs.push(flat.face_mask ? fetchBinary(flat.face_mask) : Promise.resolve(null));
+        jobs.push(info.curvature ? fetchBinary(info.curvature) : Promise.resolve(null));
+        return Promise.all(jobs).then(function (buffers) {
+          if (token !== loadToken) return;
+          var geometries = {};
+          names.forEach(function (name, i) {
+            geometries[name] = new Float32Array(buffers[i]);
+          });
+          var maskBuffer = buffers[names.length];
+          var curvBuffer = buffers[names.length + 1];
+          var baseTris = faces[index];
+          var count = geometries.wm.length / 3;
+          var part = {
+            mesh: { pts: new Float32Array(geometries.wm) },
+            hemisphere: hemisphere,
+            geometries: geometries,
+            baseTris: baseTris,
+            flatTris: maskBuffer ? maskedFaces(baseTris, new Uint8Array(maskBuffer)) : null,
+            curvature: curvBuffer ? new Float32Array(curvBuffer) : null
+          };
+          part.pivot = occipitalPivot(part);
+          prepareFlat(part);
+          // Values are sampled once, on the anatomical white surface, and ride
+          // along with the vertices through every morph.
+          var values = new Float32Array(count);
+          var anatomical = geometries.wm;
+          for (var v = 0; v < count; v += 1) {
+            values[v] = sample(anatomical[v * 3], anatomical[v * 3 + 1],
+                               anatomical[v * 3 + 2]) || 0;
+          }
+          part.values = values;
+          surfaceParts.push(part);
+        });
+      }));
+    }).then(function () {
+      if (token !== loadToken) return;
+      surfaceParts.sort(function (a, b) { return a.hemisphere < b.hemisphere ? -1 : 1; });
+      viewBuild();
+      anim.morph = state.morph;
+      anim.split = state.split;
+      cameraSplit = null;
+      syncSurfaceControls();
+      renderRegionList();
+      paintSurfaceRegions();
+      applyMorph();
+      el.loading.hidden = true;
+      el.selection.textContent = state.report.label + " · " + state.endpoint.label +
+        (state.feature ? " · " + state.feature : "") + " · " + state.subject +
+        " · " + morphLabel(state.morph) + " surface";
+    }).catch(function (error) {
+      el.loading.textContent = "surface failed: " + error.message;
+    });
+  }
+
+  function syncSurfaceSpaceButtons() {
+    var surfaces = state.manifest.surfaces || {};
+    Array.prototype.forEach.call(el["surface-spaces"].children, function (node) {
+      var space = node.getAttribute("data-surface-space");
+      node.disabled = space === "fsaverage" ? !surfaces.fsaverage : !surfaces[state.subject];
+    });
+    setPressed(el["surface-spaces"], "data-surface-space", state.surfaceSpace);
+  }
+
+  function syncSurfaceControls() {
+    var flat = flatWeightFor(state.morph) >= 1;
+    el.morph.value = Math.round(state.morph * 100);
+    el["morph-value"].textContent = morphLabel(state.morph);
+    el.separation.value = flat ? 100 : Math.round(state.split * 100);
+    el.separation.disabled = flat;
+    el.curvature.value = Math.round(state.curvature * 100);
+    setPressed(el.geometries, "data-geometry",
+      Math.abs(state.morph - Math.round(state.morph)) < 0.02
+        ? GEOMETRY_ORDER[Math.round(state.morph)] : "");
+  }
+
+  function setMorphTarget(value) {
+    state.morph = Math.max(0, Math.min(3, value));
+    syncSurfaceControls();
+    requestSurfaceFrame();
+  }
+
+  // A montage panel is its own WebGL context, and browsers hand out about
+  // sixteen before they start dropping the oldest, so a cohort larger than a
+  // page is shown a page at a time rather than all at once and broken.
+  var MONTAGE_PAGE = 12;
+
+  function montagePages() {
+    if (!state.endpoint) return 1;
+    return Math.max(Math.ceil(state.endpoint.subjects.length / MONTAGE_PAGE), 1);
+  }
+
+  function montageSubjects() {
+    var all = state.endpoint.subjects;
+    if (all.length <= MONTAGE_PAGE) return all;
+    var page = Math.min(Math.max(state.montagePage, 0), montagePages() - 1);
+    return all.slice(page * MONTAGE_PAGE, page * MONTAGE_PAGE + MONTAGE_PAGE);
+  }
+
+  function renderMontagePager() {
+    var all = state.endpoint ? state.endpoint.subjects : [];
+    var paged = state.view === "montage" && all.length > MONTAGE_PAGE;
+    el["montage-page-field"].hidden = !paged;
+    if (!paged) return;
+    var page = Math.min(Math.max(state.montagePage, 0), montagePages() - 1);
+    var first = page * MONTAGE_PAGE + 1;
+    var last = Math.min(first + MONTAGE_PAGE - 1, all.length);
+    el["montage-page-value"].textContent = first + "–" + last + " of " + all.length;
+    el["montage-prev"].disabled = page === 0;
+    el["montage-next"].disabled = page >= montagePages() - 1;
+  }
+
+  function stepMontagePage(delta) {
+    var page = Math.min(Math.max(state.montagePage + delta, 0), montagePages() - 1);
+    if (page === state.montagePage) return;
+    state.montagePage = page;
+    renderMontagePager();
+    showPanels(panelSpecs());
+  }
+
+  function panelSpecs() {
+    if (!state.endpoint || state.mode === "surface") return null;
+    if (state.view === "montage") {
+      return montageSubjects().map(function (subject) {
+        return { label: subject, subject: subject, slice: "axial" };
+      });
+    }
+    if (state.view === "multi") {
+      return ["axial", "coronal", "sagittal"].map(function (plane) {
+        return { label: plane, subject: state.subject, slice: plane };
+      });
+    }
+    return null;
+  }
+
+  function applyMode() {
+    if (!state.endpoint) return;
+    var surface = state.mode === "surface";
+    el["surface-field"].hidden = !surface;
+    el["view-field"].hidden = surface;
+    // MNI and subject T1 are volume spaces; a surface lives on fsnative or
+    // fsaverage, so the two selectors swap rather than coexist.
+    el["space-field"].hidden = surface || !feature("subjectSpace");
+    el["surface-space-field"].hidden = !surface;
+    // Hidden rather than merely cleared: clearing depends on an animation
+    // frame that a montage rebuild can starve for a second or two, and
+    // outlines left hanging over the slices read as a bug.
+    el.annotations.style.display = surface ? "block" : "none";
+    el["surface-gl"].hidden = !surface;
+    document.getElementById("gl").style.visibility = surface ? "hidden" : "visible";
+    try {
+      var layer = el.annotations;
+      if (layer.width) layer.getContext("2d").clearRect(0, 0, layer.width, layer.height);
+    } catch (ignored) {}
+    el["morph-field"].hidden = !surface;
+    el["separation-field"].hidden = !surface;
+    el["curvature-field"].hidden = !surface;
+    el["outline-width-field"].hidden = !surface;
+    el["montage-slice-field"].hidden = true;
+    setPressed(el.modes, "data-mode-kind", state.mode);
+    var regionLabel = el["roi-opacity-field"].querySelector(".label");
+    regionLabel.firstChild.nodeValue = surface ? "Outlines" : "Regions";
+    regionLabel.querySelector(".hint").setAttribute("data-tip", surface
+      ? "Opacity of the region outlines drawn on the surface. Press S to blink them off and back."
+      : "Opacity of the selected atlas regions. Press S to blink them off and back.");
+    renderRegionList();
+    if (surface) {
+      teardownPanels();
+      buildSurface();
+    } else {
+      clearSurface();
+      applyView();
+    }
+  }
+
+  // Meshes outlive a mode switch unless they are explicitly dropped, which is
+  // why the surface used to stay painted over the slices.
+  function clearSurface() {
+    surfaceParts = [];
+    viewRelease();
+    // Clear the annotation layer outright rather than leaving it to the
+    // watcher: rebuilding a montage can starve the animation frame for a
+    // second or two, and outlines hanging over the slices that long look like
+    // a bug.
+    try {
+      var layer = el.annotations;
+      if (layer && layer.width) {
+        layer.getContext("2d").clearRect(0, 0, layer.width, layer.height);
+      }
+    } catch (ignored) {}
+    lastMatrix = null;
+    view.mvp = null;
+    drawAnnotations(true);
+    markerAt = null;
+    state.surfacePan = [0, 0];
+    state.surfaceZoom = 1;
+    if (!nv) return;
+    while (nv.meshes.length) {
+      try { nv.removeMesh(nv.meshes[0]); } catch (ignored) { break; }
+    }
+    nv.drawScene();
+  }
+
+  function applyView() {
+    if (state.mode === "surface") { buildSurface(); return; }
+    el["surface-field"].hidden = true;
+    var specs = panelSpecs();
+    var panelled = specs !== null;
+    el.montage.hidden = !panelled;
+    el["montage-slice-field"].hidden = state.view !== "montage";
+    renderMontagePager();
+    el["subject-field"].hidden = state.view === "montage";
+    if (panelled) { showPanels(specs); return; }
+    teardownPanels();
+    if (!nv) return;
+    try { nv.resizeListener(); } catch (ignored) {}
+    var map = {
+      axial: nv.sliceTypeAxial, coronal: nv.sliceTypeCoronal,
+      sagittal: nv.sliceTypeSagittal, render: nv.sliceTypeRender
+    };
+    nv.setSliceType(map[state.view]);
+    // Coming back from a panel view the main instance still holds only the
+    // underlay, so the overlay has to be put back.
+    if (nv.volumes.length < 2) loadOverlay(); else nv.drawScene();
+  }
+
+  function teardownPanels() {
+    el.montage.hidden = true;
+    montageViews.forEach(function (view) {
+      // Dropping the volumes first lets their typed arrays go with the
+      // context, rather than waiting on whatever still references the
+      // instance.
+      try {
+        while (view.nv.volumes.length) {
+          view.nv.removeVolume(view.nv.volumes[view.nv.volumes.length - 1]);
+        }
+      } catch (ignored) {}
+      view.toMNI = null;
+      view.fromMNI = null;
+      try { view.nv.gl.getExtension("WEBGL_lose_context").loseContext(); } catch (ignored) {}
+    });
+    montageViews = [];
+    el.montage.textContent = "";
+  }
+
+  function linkThroughMNI() {
+    var specs = (state.manifest.subject_space || {}).coords || {};
+    var needed = montageViews.filter(function (view) { return specs[view.subject]; });
+    if (needed.length < 2) return;
+    Promise.all(needed.map(function (view) {
+      return Promise.all([
+        loadCoordField(specs[view.subject].anat_to_mni),
+        loadCoordField(specs[view.subject].mni_to_anat)
+      ]).then(function (fields) {
+        view.toMNI = fields[0];
+        view.fromMNI = fields[1];
+        return view;
+      });
+    })).then(function (views) {
+      var syncing = false;
+      views.forEach(function (source) {
+        source.nv.onLocationChange = function (location) {
+          reportLocation(location);
+          if (syncing || !location || !location.mm) return;
+          var mni = sampleField(source.toMNI, Array.from(location.mm).slice(0, 3));
+          if (!mni) return;
+          syncing = true;
+          views.forEach(function (target) {
+            if (target === source) return;
+            var anat = sampleField(target.fromMNI, mni);
+            if (!anat) return;
+            try {
+              target.nv.scene.crosshairPos = target.nv.mm2frac(anat);
+              target.nv.drawScene();
+            } catch (ignored) {}
+          });
+          syncing = false;
+          el.coords.textContent = mni.map(function (v) { return Math.round(v); }).join(", ");
+        };
+      });
+      el.diagnostic.textContent = "crosshairs linked through MNI across " + views.length + " subjects";
+    }).catch(function (error) {
+      el.diagnostic.textContent = "coordinate linkage failed: " + error.message;
+    });
+  }
+
+  function linkDirect() {
+    var syncing = false;
+    montageViews.forEach(function (view) {
+      view.nv.onLocationChange = function (location) {
+        reportLocation(location);
+        if (syncing) return;
+        syncing = true;
+        var position = Array.from(view.nv.scene.crosshairPos);
+        montageViews.forEach(function (other) {
+          if (other === view) return;
+          other.nv.scene.crosshairPos = position.slice();
+          other.nv.drawScene();
+        });
+        syncing = false;
+      };
+    });
+  }
+
+  function mapForSubject(subject) {
+    if (state.space === "subject") {
+      var found = null;
+      ((state.manifest.subject_space || {}).maps || []).forEach(function (m) {
+        if (m.report === state.report.id && m.endpoint === state.endpoint.id &&
+            m.feature === state.feature && m.subject === subject) found = m;
+      });
+      return found;
+    }
+    for (var i = 0; i < state.endpoint.maps.length; i += 1) {
+      var m = state.endpoint.maps[i];
+      if (m.subject === subject && m.feature === state.feature) return m;
+    }
+    return null;
+  }
+
+  // 1 mm anatomy under a native-resolution overlay. NiiVue composites the
+  // overlay onto the underlay grid, so the map ends up nearest-upsampled to
+  // 1 mm: blocky data over a sharp brain, which is the intended look.
+  // NiiVue composites every overlay onto the underlay's grid, so the underlay
+  // resolution sets the size of the RGBA blend texture each panel holds: about
+  // 29 MB at 1 mm against 3.6 MB at 2 mm. One or three panels can afford the
+  // sharp one; eight of them is a quarter of a gigabyte of texture, which is
+  // more than a phone has to give.
+  function underlayFor(subject, coarse) {
+    var space = state.manifest.subject_space;
+    if (state.space === "subject") {
+      var fine = space.templates[subject];
+      return coarse && space.templates_2mm ? (space.templates_2mm[subject] || fine) : fine;
+    }
+    return coarse ? (state.manifest.template_montage || state.manifest.template)
+                  : state.manifest.template;
+  }
+
+  // Two reasons to drop to the coarse underlay. A montage cell is a quarter
+  // of the window wide, where 1 mm anatomy is not something you can see. And a
+  // map that is itself 2 or 3 mm gains nothing from a 1 mm blend grid at any
+  // size: NiiVue composites the overlay onto the underlay, so the fine one
+  // costs eight times the texture per panel and shows the same blocky voxels.
+  // On this page that was most of the wait when switching endpoint.
+  function coarseMap(entry) {
+    if ((state.manifest.features || {}).fineUnderlay !== false) return false;
+    var zooms = entry && entry.zooms;
+    if (!zooms || !zooms.length) return false;
+    return Math.min.apply(null, zooms) >= 1.8;
+  }
+
+  function coarseUnderlay(specs) {
+    if (specs && specs.length > 3) return true;
+    return coarseMap(styleEntry());
+  }
+
+  // Rebuilding panels means recreating WebGL contexts and reloading the
+  // underlay, which is most of the cost of a switch. When only the map changes
+  // the existing panels can keep everything and swap volume 1.
+  function panelShape(specs) {
+    if (!specs) return "";
+    // The space and the underlay resolution belong in the key: swapping only
+    // the map would otherwise leave an MNI underlay under a subject-space
+    // overlay, or a 2 mm one under a view that wants 1 mm.
+    return state.space + "::" +
+      specs.map(function (s) { return s.subject + "|" + s.slice; }).join(",");
+  }
+
+  function swapOverlays(specs) {
+    var token = ++loadToken;
+    return Promise.all(specs.map(function (spec, index) {
+      var entry = mapForSubject(spec.subject);
+      var view = montageViews[index];
+      if (!entry || !view) return null;
+      return loadImage(entry.path).then(function (image) {
+        if (token !== loadToken) return null;
+        while (view.nv.volumes.length > 1) {
+          view.nv.removeVolume(view.nv.volumes[view.nv.volumes.length - 1]);
+        }
+        view.nv.addVolume(image);
+        view.entry = entry;
+        return view;
+      });
+    })).then(function () {
+      if (token !== loadToken) return;
+      refreshStyle();
+      refreshRegions();
+      el.loading.hidden = true;
+      prefetchSiblings();
+    });
+  }
+
+  function showPanels(specs) {
+    if (montageViews.length === specs.length && panelSpace === state.space &&
+        panelCoarse === coarseUnderlay(specs) &&
+        panelShape(specs) === panelShape(montageViews.map(function (v) {
+          return { subject: v.subject, slice: v.slice };
+        }))) {
+      el.loading.hidden = true;
+      swapOverlays(specs);
+      return;
+    }
+    buildPanels(specs);
+  }
+
+  function buildPanels(specs) {
+    var coarse = coarseUnderlay(specs);
+    teardownPanels();
+    panelSpace = state.space;
+    panelCoarse = coarse;
+    // buildPanels is reached at startup as well as from a view click, so it
+    // owns the container's visibility rather than leaving it to applyView.
+    el.montage.hidden = false;
+    el["montage-slice-field"].hidden = state.view !== "montage";
+    renderMontagePager();
+    el["subject-field"].hidden = state.view === "montage";
+    var token = ++loadToken;
+    el.loading.hidden = false;
+    el.loading.textContent = "building view…";
+    // Three columns on a phone leaves cells too small to pinch inside, let
+    // alone read, so a narrow window gets at most two.
+    // matchMedia, not innerWidth: the CSS breakpoints are what decide how wide
+    // a cell ends up, and innerWidth disagrees with them under device
+    // emulation and on any page without a layout viewport of its own.
+    var narrow = window.matchMedia("(max-width: 760px)").matches;
+    var columns = Math.min(specs.length, narrow ? 2 : 4);
+    el.montage.style.gridTemplateColumns = "repeat(" + columns + ", 1fr)";
+    var pending = specs.map(function (spec) {
+      var entry = mapForSubject(spec.subject);
+      if (!entry) return Promise.resolve(null);
+      var cell = document.createElement("div");
+      cell.className = "cell";
+      var canvas = document.createElement("canvas");
+      var tag = document.createElement("span");
+      tag.className = "tag";
+      tag.textContent = spec.label;
+      cell.appendChild(canvas);
+      cell.appendChild(tag);
+      el.montage.appendChild(cell);
+      var instance = new Niivue({
+        backColor: [0.02, 0.03, 0.04, 1], show3Dcrosshair: false,
+        isColorbar: false, isNearestInterpolation: true,
+        dragMode: DRAG.pan, scrollRequiresFocus: true,
+        mouseEventConfig: { rightButton: DRAG.none, centerButton: DRAG.pan }
+      });
+      registerColormaps(instance);
+      registerRegionColormap(instance);
+      return instance.attachToCanvas(canvas)
+        .then(function () {
+          return Promise.all([
+            loadImage(underlayFor(spec.subject, coarse)),
+            loadImage(entry.path)
+          ]);
+        })
+        .then(function (images) {
+          images[0].colormap = "gray";
+          instance.addVolume(images[0]);
+          instance.addVolume(images[1]);
+          var slices = {
+            axial: instance.sliceTypeAxial,
+            coronal: instance.sliceTypeCoronal,
+            sagittal: instance.sliceTypeSagittal
+          };
+          instance.setSliceType(slices[spec.slice]);
+          keepUnfocused(canvas);
+          wireZoom(instance, canvas);
+          wireTouchGestures(instance, canvas);
+          wireWheel(instance, canvas, function () {
+            return { axial: 2, coronal: 1, sagittal: 0 }[spec.slice];
+          });
+          try { instance.setInterpolation(true); } catch (ignored) {}
+          instance.onLocationChange = reportLocation;
+          return { nv: instance, entry: entry, subject: spec.subject, slice: spec.slice };
+        });
+    });
+    Promise.all(pending).then(function (views) {
+      if (token !== loadToken) return;
+      montageViews = views.filter(Boolean);
+      var manySubjects = montageViews.some(function (v) {
+        return v.subject !== montageViews[0].subject;
+      });
+      if (state.space === "subject" && manySubjects) linkThroughMNI();
+      else linkDirect();
+      refreshStyle();
+      refreshRegions();
+      if (state.view === "montage") applyMontageSlice();
+      el.loading.hidden = true;
+    }).catch(function (error) {
+      el.loading.textContent = "view failed: " + error.message;
+    });
+  }
+
+  function applyMontageSlice() {
+    var fraction = el["montage-slice"].value / 100;
+    el["montage-slice-value"].textContent = Math.round(fraction * 100) + "%";
+    montageViews.forEach(function (view) {
+      view.nv.scene.crosshairPos = [0.5, 0.5, fraction];
+      view.nv.drawScene();
+    });
+  }
+
+  function renderRail() {
+    el.reports.textContent = "";
+    state.manifest.reports.forEach(function (report) {
+      var node = document.createElement("button");
+      node.type = "button"; node.className = "item";
+      node.setAttribute("aria-pressed", report === state.report ? "true" : "false");
+      node.innerHTML = "<span></span><span class='sub'></span>";
+      node.children[0].textContent = report.label;
+      node.children[1].textContent = report.endpoints.length + " endpoints";
+      node.addEventListener("click", function () { selectReport(report); });
+      el.reports.appendChild(node);
+    });
+    el.endpoints.textContent = "";
+    state.report.endpoints.forEach(function (endpoint) {
+      var node = document.createElement("button");
+      node.type = "button"; node.className = "item";
+      node.setAttribute("aria-pressed", endpoint === state.endpoint ? "true" : "false");
+      node.textContent = endpoint.label;
+      node.addEventListener("click", function () { selectEndpoint(endpoint); });
+      el.endpoints.appendChild(node);
+    });
+    el.blurb.textContent = state.endpoint.blurb;
+    // An endpoint that says nothing about how it got into the template space
+    // gets no badge, rather than an empty one.
+    var badge = el["warp-badge"];
+    badge.hidden = !state.endpoint.warp;
+    badge.textContent = state.endpoint.warp + " warp to MNI";
+    badge.className = "badge" + (state.endpoint.warp === "affine" ? " affine" : "");
+  }
+
+  function renderBar() {
+    if (!state.endpoint) return;
+    var features = state.endpoint.features;
+    var hasFeatures = features.length > 1 || (features.length === 1 && features[0].id !== "");
+    el["feature-field"].hidden = !hasFeatures;
+    el.features.textContent = "";
+    if (hasFeatures) {
+      features.forEach(function (feature) {
+        var node = document.createElement("button");
+        node.type = "button"; node.textContent = feature.label;
+        node.setAttribute("aria-pressed", feature.id === state.feature ? "true" : "false");
+        node.addEventListener("click", function () {
+          state.feature = feature.id; renderBar();
+          if (panelSpecs()) showPanels(panelSpecs()); else loadOverlay();
+        });
+        el.features.appendChild(node);
+      });
+    }
+    el.subjects.textContent = "";
+    state.endpoint.subjects.forEach(function (subject) {
+      var node = document.createElement("button");
+      node.type = "button"; node.textContent = subject;
+      node.setAttribute("aria-pressed", subject === state.subject ? "true" : "false");
+      node.addEventListener("click", function () {
+        state.subject = subject; renderBar();
+        if (panelSpecs()) showPanels(panelSpecs()); else loadOverlay();
+      });
+      el.subjects.appendChild(node);
+    });
+    if (state.montagePage >= montagePages()) state.montagePage = 0;
+    var statisticalNow = state.endpoint.statistic === "t";
+    el["threshold-modes"].hidden = !statisticalNow;
+    el["threshold-mode-field"].hidden = !statisticalNow;
+    if (!statisticalNow && state.thresholdMode !== "value") {
+      state.thresholdMode = "value";
+      setPressed(el["threshold-modes"], "data-mode", "value");
+    }
+    var hasSubjectSpace = subjectSpaceEntry() !== null;
+    el.spaces.children[1].disabled = !hasSubjectSpace;
+    if (!hasSubjectSpace && state.space === "subject") state.space = "mni";
+    setPressed(el.spaces, "data-space", state.space);
+    Array.prototype.forEach.call(el.views.children, function (node) {
+      var view = node.getAttribute("data-view");
+      if (view === "montage") node.disabled = state.endpoint.subjects.length < 2;
+    });
+    el.modes.children[1].disabled = !surfacesAvailable() || !feature("surface");
+    if (!surfacesAvailable() && state.mode === "surface") state.mode = "volume";
+    setPressed(el.modes, "data-mode-kind", state.mode);
+  }
+
+  function resetWindow() {
+    var high = state.endpoint.range[1];
+    el["window-max"].value = Number(high.toPrecision(3));
+    retuneStep(el["window-max"]);
+    if (state.thresholdMode === "value") {
+      // A fifth of the window is a reasonable default, but an endpoint can
+      // ask for its own: in a comparison where one condition is far weaker
+      // than the others, a threshold scaled to the shared window hides it.
+      var low = state.endpoint.range[0];
+      var floor = low > 0 && low < high ? low : high * 0.2;
+      el["threshold-input"].value = Number(floor.toPrecision(3));
+    }
+    retuneStep(el["threshold-input"]);
+    refreshStyle();
+  }
+
+  function selectReport(report) {
+    state.report = report;
+    selectEndpoint(report.endpoints[0]);
+  }
+
+  // Comparing two endpoints means comparing them at one window, so a switch
+  // keeps whatever the reader has dialled in as long as the new endpoint asks
+  // for the same range. It only resets when the endpoint declares a different
+  // one, which is how a viewer says "this is a different quantity" -- a group
+  // average beside the individual maps it was made from, say.
+  function sameWindow(a, b) {
+    if (!a || !b) return false;
+    return Math.abs(a[0] - b[0]) < 1e-9 && Math.abs(a[1] - b[1]) < 1e-9;
+  }
+
+  function selectEndpoint(endpoint) {
+    var carried = sameWindow(state.endpoint && state.endpoint.range, endpoint.range);
+    state.endpoint = endpoint;
+    state.feature = endpoint.features.length ? endpoint.features[0].id : "";
+    if (endpoint.subjects.indexOf(state.subject) === -1) state.subject = endpoint.subjects[0];
+    if (endpoint.subjects.length < 2 && state.view === "montage") state.view = "multi";
+    renderRail(); renderBar();
+    if (carried) syncDual(); else resetWindow();
+    applyMode();
+  }
+
+  function loadOverlay() {
+    if (!nv) return;
+    var subjectEntry = inSubjectSpace() ? subjectSpaceEntry() : null;
+    var entry = subjectEntry || currentMap();
+    if (!entry) return;
+    var wantedTemplate = underlayFor(state.subject, coarseUnderlay(null));
+    var token = ++loadToken;
+    el.loading.hidden = false;
+    el.loading.textContent = "loading…";
+    el.selection.textContent = state.report.label + " · " + state.endpoint.label +
+      (state.feature ? " · " + state.feature : "") + " · " + state.subject +
+      (subjectEntry ? " · subject T1" : "");
+
+    var templateReady = wantedTemplate === loadedTemplate
+      ? Promise.resolve(null)
+      : loadImage(wantedTemplate);
+    Promise.all([templateReady, loadImage(entry.path)]).then(function (images) {
+      if (token !== loadToken) return;
+      if (images[0]) {
+        while (nv.volumes.length) nv.removeVolume(nv.volumes[nv.volumes.length - 1]);
+        images[0].colormap = "gray";
+        nv.addVolume(images[0]);
+        loadedTemplate = wantedTemplate;
+      } else {
+        while (nv.volumes.length > 1) nv.removeVolume(nv.volumes[nv.volumes.length - 1]);
+      }
+      nv.addVolume(images[1]);
+      try { nv.setInterpolation(true); } catch (ignored) {}
+      refreshStyle();
+      el.loading.hidden = true;
+      prefetchSiblings();
+    }).catch(function (error) {
+      if (token !== loadToken) return;
+      el.loading.hidden = false;
+      el.loading.textContent = "could not load " + entry.path + " — " + error.message;
+    });
+  }
+
+  // NiiVue's right-drag adjusts brightness and contrast, which is easy to
+  // trigger by accident and hard to undo. Right drag zooms instead.
+  function keepUnfocused(canvas) {
+    canvas.addEventListener("focus", function () { canvas.blur(); });
+  }
+
+  function wireZoom(instance, canvas) {
+    var dragging = false, lastX = 0, lastY = 0;
+    canvas.addEventListener("contextmenu", function (event) { event.preventDefault(); });
+    canvas.addEventListener("pointerdown", function (event) {
+      if (event.button !== 2) return;
+      dragging = true; lastX = event.clientX; lastY = event.clientY;
+      try { canvas.setPointerCapture(event.pointerId); } catch (ignored) {}
+      event.preventDefault();
+      event.stopPropagation();
+    }, true);
+    canvas.addEventListener("pointermove", function (event) {
+      if (!dragging) return;
+      // Up or right zooms in, down or left zooms out, so either axis of the
+      // drag does what it looks like it should.
+      var travel = (event.clientX - lastX) + (lastY - event.clientY);
+      var factor = Math.exp(travel * 0.006);
+      // volScaleMultiplier is the 3D render zoom; the 2D slice views are
+      // scaled by the fourth element of pan2Dxyzmm.
+      var pan = instance.scene.pan2Dxyzmm;
+      if (pan && pan.length > 3) {
+        pan[3] = Math.min(Math.max(pan[3] * factor, 0.4), 12);
+        instance.scene.pan2Dxyzmm = pan;
+      }
+      var scale = instance.scene.volScaleMultiplier || 1;
+      instance.scene.volScaleMultiplier = Math.min(Math.max(scale * factor, 0.4), 8);
+      lastX = event.clientX;
+      lastY = event.clientY;
+      instance.drawScene();
+      event.preventDefault();
+      event.stopPropagation();
+    }, true);
+    ["pointerup", "pointercancel", "pointerleave"].forEach(function (name) {
+      canvas.addEventListener(name, function () { dragging = false; }, true);
+    });
+  }
+
+  // NiiVue's own wheel handling does not step slices here, so the page does
+  // it: one notch moves the crosshair one voxel along the axis the hovered
+  // view is cutting through.
+  function wireWheel(instance, canvas, axisFor) {
+    // NiiVue registers its own wheel listener on the canvas first, and a
+    // listener on the same element cannot cancel one registered earlier.
+    // Listening on the parent during the capture phase runs before it, so
+    // stopping propagation there keeps NiiVue's zoom out of the way.
+    var host = canvas.parentElement || canvas;
+    host.addEventListener("wheel", function (event) {
+      // The main view's host is an ancestor of the panel cells, so without
+      // this guard it would swallow wheel events aimed at a panel.
+      if (event.target !== canvas) return;
+      var axis = axisFor(event);
+      if (axis === null) return;
+      var position = Array.from(instance.scene.crosshairPos);
+      var dims = instance.volumes.length ? instance.volumes[0].dimsRAS : null;
+      var extent = dims && dims.length > 3 ? dims[axis + 1] : 100;
+      var step = (event.deltaY > 0 ? 1 : -1) / Math.max(extent, 2);
+      position[axis] = Math.min(Math.max(position[axis] + step, 0), 1);
+      instance.scene.crosshairPos = position;
+      instance.drawScene();
+      if (instance.onLocationChange) {
+        try { instance.onLocationChange({ mm: instance.frac2mm(position) }); } catch (ignored) {}
+      }
+      event.preventDefault();
+      event.stopPropagation();
+    }, { passive: false, capture: true });
+  }
+
+  function mainAxisFor(event) {
+    if (state.mode === "surface") return null;
+    var map = { axial: 2, coronal: 1, sagittal: 0 };
+    if (map[state.view] !== undefined) return map[state.view];
+    if (state.view === "render") return null;
+    // Multiplanar: NiiVue lays the three planes out left to right, so the
+    // horizontal position of the cursor says which one is being scrolled.
+    var box = (event.currentTarget || event.target).getBoundingClientRect();
+    var third = (event.clientX - box.left) / box.width;
+    return third < 0.34 ? 2 : (third < 0.67 ? 1 : 0);
+  }
+
+  function wireSurfaceControls() {
+    // The sliders move a target; the surface eases towards it on its own.
+    el.morph.addEventListener("input", function () {
+      setMorphTarget(el.morph.value / 100);
+    });
+    el.separation.addEventListener("input", function () {
+      state.split = el.separation.value / 100;
+      requestSurfaceFrame();
+    });
+    el.curvature.addEventListener("input", function () {
+      state.curvature = el.curvature.value / 100;
+      refreshCurvature();
+    });
+    el["outline-width"].addEventListener("input", function () {
+      state.outlineWidth = Number(el["outline-width"].value);
+      drawRegionTexture();
+      viewDraw();
+    });
+  }
+
+  function wireSurfaceSpace() {
+    el["surface-spaces"].addEventListener("click", function (event) {
+      var target = event.target.closest("button");
+      if (!target || target.disabled) return;
+      state.surfaceSpace = target.getAttribute("data-surface-space");
+      setPressed(el["surface-spaces"], "data-surface-space", state.surfaceSpace);
+      buildSurface();
+    });
+  }
+
+  function wireRegions() {
+    el["roi-filter"].addEventListener("input", renderRegionList);
+    el["roi-opacity"].addEventListener("input", function () {
+      if (state.mode === "surface") {
+        state.outlineOpacity = el["roi-opacity"].value / 100;
+        viewDraw();
+        drawAnnotations(true);
+        return;
+      }
+      refreshRegions();
+    });
+    el.modes.addEventListener("click", function (event) {
+      var target = event.target.closest("button");
+      if (!target || target.disabled) return;
+      state.mode = target.getAttribute("data-mode-kind");
+      applyMode();
+    });
+    el["roi-all"].addEventListener("click", function () {
+      if (state.mode === "surface") {
+        surfaceRegionNames().forEach(function (name) {
+          if (!state.surfaceRegions[name]) {
+            state.surfaceRegions[name] = true;
+            colourSlot("surface:" + name);
+          }
+        });
+        renderRegionList();
+        paintSurfaceRegions();
+        return;
+      }
+      var atlas = currentAtlas();
+      if (!atlas) return;
+      atlas.regions.forEach(function (region) {
+        var key = regionKey(atlas.id, region.value);
+        if (!state.regions[key]) { state.regions[key] = true; colourSlot(key); }
+      });
+      renderRegionList();
+      refreshRegions();
+    });
+    el["roi-clear"].addEventListener("click", function () {
+      Object.keys(state.surfaceRegions).forEach(function (name) {
+        releaseColour("surface:" + name);
+      });
+      Object.keys(state.regions).forEach(releaseColour);
+      state.surfaceRegions = {};
+      state.regions = {};
+      renderRegionList();
+      // Clearing has to repaint the mode that is actually showing, or the
+      // regions stay on screen until something else happens to redraw them.
+      if (state.mode === "surface") paintSurfaceRegions(); else refreshRegions();
+    });
+    el.geometries.addEventListener("click", function (event) {
+      var target = event.target.closest("button"); if (!target) return;
+      state.geometry = target.getAttribute("data-geometry");
+      var index = GEOMETRY_ORDER.indexOf(state.geometry);
+      setPressed(el.geometries, "data-geometry", state.geometry);
+      if (surfaceParts.length && index >= 0) setMorphTarget(index);
+      else buildSurface();
+    });
+    el.hemispheres.addEventListener("click", function (event) {
+      var target = event.target.closest("button"); if (!target) return;
+      var hemisphere = target.getAttribute("data-hemi");
+      state.hemispheres[hemisphere] = !state.hemispheres[hemisphere];
+      target.setAttribute("aria-pressed", state.hemispheres[hemisphere] ? "true" : "false");
+      if (state.mode === "surface") buildSurface();
+    });
+  }
+
+  // Blink a layer off and back, which is how you check what is under it.
+  function wireOpacityHotkeys() {
+    var stash = {};
+    function toggle(slider, name, after) {
+      if (stash[name] === undefined) {
+        stash[name] = slider.value;
+        slider.value = 0;
+      } else {
+        slider.value = stash[name];
+        delete stash[name];
+      }
+      after();
+    }
+    document.addEventListener("keydown", function (event) {
+      var target = event.target || {};
+      if (target.tagName === "INPUT" || target.tagName === "TEXTAREA") return;
+      var key = (event.key || "").toLowerCase();
+      if (key === "a") {
+        toggle(el.opacity, "overlay", refreshStyle);
+      } else if (key === "s") {
+        toggle(el["roi-opacity"], "regions", refreshRegions);
+      } else {
+        return;
+      }
+      event.preventDefault();
+    });
+  }
+
+  function wire() {
+    el["threshold-input"].addEventListener("input", function () {
+      retuneStep(el["threshold-input"]);
+      refreshStyle();
+    });
+    el["window-max"].addEventListener("input", function () {
+      retuneStep(el["window-max"]);
+      refreshStyle();
+    });
+    el["window-reset"].addEventListener("click", resetWindow);
+    el.opacity.addEventListener("input", refreshStyle);
+    el["montage-slice"].addEventListener("input", applyMontageSlice);
+    el["montage-prev"].addEventListener("click", function () { stepMontagePage(-1); });
+    el["montage-next"].addEventListener("click", function () { stepMontagePage(1); });
+    el.views.addEventListener("click", function (event) {
+      var target = event.target.closest("button"); if (!target) return;
+      state.view = target.getAttribute("data-view");
+      setPressed(el.views, "data-view", state.view);
+      applyView();
+    });
+    el["threshold-modes"].addEventListener("click", function (event) {
+      var target = event.target.closest("button");
+      if (!target || target.disabled) return;
+      state.thresholdMode = target.getAttribute("data-mode");
+      setPressed(el["threshold-modes"], "data-mode", state.thresholdMode);
+      var defaults = { value: null, p: 0.001, q: 0.05 };
+      if (defaults[state.thresholdMode] !== null) {
+        el["threshold-input"].value = defaults[state.thresholdMode];
+      } else {
+        el["threshold-input"].value = Number((windowMax() * 0.2).toPrecision(3));
+      }
+      retuneStep(el["threshold-input"]);
+      refreshStyle();
+    });
+    el.blends.addEventListener("click", function (event) {
+      var target = event.target.closest("button"); if (!target) return;
+      state.blend = target.getAttribute("data-blend");
+      setPressed(el.blends, "data-blend", state.blend);
+      refreshStyle();
+    });
+    el.spaces.addEventListener("click", function (event) {
+      var target = event.target.closest("button");
+      if (!target || target.disabled) return;
+      state.space = target.getAttribute("data-space");
+      setPressed(el.spaces, "data-space", state.space);
+      renderBar();
+      if (state.mode === "surface") { buildSurface(); return; }
+      if (panelSpecs()) showPanels(panelSpecs()); else loadOverlay();
+    });
+  }
+
+  // Everything the page shows about itself comes from the manifest, and so
+  // does the feature set: a project with no surfaces never sees the surface
+  // toggle, one with no atlas never sees the region panel. Data alone decides
+  // it unless the manifest asks for something to be off.
+  function describe(manifest) {
+    var about = manifest.about || {};
+    document.title = about.title || "Result Browser";
+    el.title.textContent = about.title || "Result Browser";
+    el.kicker.textContent = about.kicker || "";
+    el.lede.textContent = about.lede || "";
+    el.footnote.innerHTML = about.footnote || "";
+  }
+
+  function feature(name) {
+    var features = state.manifest.features || {};
+    if (features[name] === false) return false;
+    if (name === "surface") {
+      return !!(state.manifest.surfaces && Object.keys(state.manifest.surfaces).length);
+    }
+    if (name === "regions") {
+      return !!(state.manifest.atlas && (state.manifest.atlas.atlases || []).length);
+    }
+    if (name === "subjectSpace") {
+      return !!(state.manifest.subject_space && state.manifest.subject_space.templates);
+    }
+    return true;
+  }
+
+  function applyFeatures() {
+    el["space-field"].hidden = !feature("subjectSpace");
+    var regions = el["roi-list"].closest(".group");
+    if (regions) regions.hidden = !feature("regions");
+    el["roi-opacity-field"].hidden = !feature("regions") && !feature("surface");
+    Array.prototype.forEach.call(el.views.children, function (node) {
+      if (node.getAttribute("data-view") === "montage") {
+        node.hidden = state.manifest.features &&
+          state.manifest.features.montage === false;
+      }
+    });
+    el.modes.hidden = !feature("surface");
+  }
+
+  function start(manifest) {
+    state.manifest = manifest;
+    describe(manifest);
+    nv = new Niivue({
+      backColor: [0.02, 0.03, 0.04, 1],
+      crosshairColor: [0.31, 0.66, 0.85, 1],
+      show3Dcrosshair: true,
+      isNearestInterpolation: true,
+      // NiiVue's wheel handler zooms as well as scrolling; gating it on focus
+      // and never letting the canvas take focus leaves the page's own handler
+      // in sole charge.
+      scrollRequiresFocus: true,
+      // dragMode governs the non-primary drag. Setting it to none disabled
+      // middle-click pan as well, so it stays on pan and only the right
+      // button is overridden, freeing that button for the zoom handler.
+      dragMode: DRAG.pan,
+      mouseEventConfig: { rightButton: DRAG.none, centerButton: DRAG.pan }
+    });
+    registerColormaps(nv);
+    nv.attachTo("gl").then(function () {
+      nv.onLocationChange = reportLocation;
+      return loadImage(underlayFor(state.subject));
+    }).then(function (anatomy) {
+      anatomy.colormap = "gray";
+      nv.addVolume(anatomy);
+      loadedTemplate = manifest.template;
+      nv.setSliceType(nv.sliceTypeMultiplanar);
+      try { nv.setInterpolation(true); } catch (ignored) {}
+      window.__viewer = {
+        get nv() { return nv; },
+        get state() { return state; },
+        get montage() { return montageViews; },
+        get parts() { return surfaceParts; },
+        get overlayCanvas() { return view.overlayCanvas; },
+        get surfaceView() { return view; },
+        get marker() { return markerAt; },
+        get labels() { return lastLabels; },
+        renderMatrix: function () { return renderMatrix(); },
+        refreshStyle: refreshStyle
+      };
+      wire();
+      wireOpacityHotkeys();
+      wireSurfaceSpace();
+      wireSurfaceControls();
+      wireSurfacePicking();
+      wireSurfaceNavigation();
+      watchAnnotations();
+      wireRegions();
+      wireDual();
+      keepUnfocused(document.getElementById("gl"));
+      wireZoom(nv, document.getElementById("gl"));
+      wireWheel(nv, document.getElementById("gl"), mainAxisFor);
+      registerRegionColormap(nv);
+      renderRegionList();
+      applyFeatures();
+      selectReport(manifest.reports[0]);
+    }).catch(function (error) {
+      el.loading.textContent = "startup failed: " + error.message;
+    });
+  }
+
+  fetch("manifest.json").then(function (r) { return r.json(); }).then(start)
+    .catch(function (error) {
+      el.loading.textContent = "could not read manifest.json — " + error.message;
+    });
+})();
+</script>
+</body>
+</html>
