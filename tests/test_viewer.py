@@ -10,6 +10,7 @@ import numpy as np
 
 from fmri_utils.viewer import (
     About,
+    AnatomyImage,
     Atlas,
     CoordinateMaps,
     Endpoint,
@@ -17,6 +18,9 @@ from fmri_utils.viewer import (
     MapEntry,
     Report,
     SubjectSpace,
+    Variant,
+    VariantControl,
+    VariantOption,
     ViewerSpec,
     build_viewer,
 )
@@ -156,6 +160,69 @@ class BuildTests(unittest.TestCase):
             for entry in manifest["reports"][0]["endpoints"][0]["maps"]:
                 self.assertNotIn("thresholds", entry)
 
+    def test_variant_controls_and_significance_reach_the_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rng = np.random.default_rng(1)
+            effect = _write(rng.normal(0, 1, (8, 8, 8)), root / "effect.nii.gz")
+            neglog = _write(rng.random((8, 8, 8)) * 2, root / "neglog10p.nii.gz")
+            controls = [
+                VariantControl(id="delta", label="Δr", on="1", off="0"),
+                VariantControl(id="test", label="Group test", options=[
+                    VariantOption("none", "none"),
+                    VariantOption("tfce", "TFCE", unavailable="mean of features only"),
+                ]),
+            ]
+            variants = [
+                Variant("r", "r", values={"delta": "0", "test": "none"}),
+                Variant("d", "Δr", values={"delta": "1", "test": "none"}),
+                Variant("dt", "Δr, TFCE", values={"delta": "1", "test": "tfce"},
+                        threshold_default=("p", 0.05),
+                        subject_display_ranges={"group": (0.0, 0.01)}),
+            ]
+            maps = [
+                MapEntry(subject="group", path=effect, variant="r"),
+                MapEntry(subject="group", path=effect, variant="d"),
+                MapEntry(subject="group", path=effect, variant="dt", significance_p=neglog,
+                         significance_label="TFCE FWE"),
+            ]
+            endpoint = Endpoint(id="e", label="E", maps=maps, variants=variants,
+                                variant_controls=controls)
+            spec = _spec(root, reports=[Report(id="r", label="R", endpoints=[endpoint])])
+            out = build_viewer(spec, root / "viewer", quiet=True)
+            manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+            built = manifest["reports"][0]["endpoints"][0]
+            self.assertEqual([c["id"] for c in built["variant_controls"]], ["delta", "test"])
+            self.assertEqual(built["variant_controls"][0]["kind"], "toggle")
+            self.assertEqual(built["variant_controls"][1]["options"][1]["unavailable"],
+                             "mean of features only")
+            self.assertNotIn("variant_control", built)
+            tfce = built["variants"][2]
+            self.assertEqual(tfce["values"], {"delta": "1", "test": "tfce"})
+            self.assertEqual(tfce["threshold_default"], {"mode": "p", "value": 0.05})
+            self.assertEqual(tfce["subject_ranges"], {"group": [0.0, 0.01]})
+            with_sig = [m for m in built["maps"] if m.get("significance")]
+            self.assertEqual(len(with_sig), 1)
+            self.assertEqual(with_sig[0]["significance"]["label"], "TFCE FWE")
+            self.assertTrue((out / with_sig[0]["significance"]["p"]).exists())
+            self.assertNotIn("q", with_sig[0]["significance"])
+
+    def test_check_rejects_a_variant_value_no_control_offers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            spec = _spec(root)
+            maps = [MapEntry(subject="sub-01", path=spec.reports[0].endpoints[0].maps[0].path,
+                             variant="a")]
+            endpoint = Endpoint(
+                id="e", label="E", maps=maps,
+                variants=[Variant("a", "a", values={"test": "bogus"})],
+                variant_controls=[VariantControl(id="test", label="T",
+                                                 options=[VariantOption("none", "none")])],
+            )
+            spec = _spec(root, reports=[Report(id="r", label="R", endpoints=[endpoint])])
+            with self.assertRaises(ValueError):
+                spec.check()
+
     def test_optional_parts_appear_only_when_supplied(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -197,6 +264,133 @@ class BuildTests(unittest.TestCase):
             self.assertEqual(atlas["regions"], [{"value": 1, "name": "Blob"}])
             self.assertTrue((out / atlas["mni"]).exists())
 
+
+    def test_registration_maps_carry_their_underlay_frame_and_warp(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rng = np.random.default_rng(4)
+            anatomy = _write(rng.random((12, 12, 12)) * 100 + 1, root / "anat.nii.gz")
+            boldref = _write(rng.random((6, 6, 6)) * 50 + 1, root / "boldref.nii.gz",
+                             np.diag([2.0, 2.0, 2.0, 1.0]))
+            # A field that is exactly an affine: template mm -> 2 x + 3.
+            ijk = np.stack(np.meshgrid(*[np.arange(12.0)] * 3, indexing="ij"), -1)
+            field = _write(2.0 * ijk + 3.0, root / "field.nii.gz")
+            shift = [[1, 0, 0, 5], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]
+            endpoint = Endpoint(
+                id="reg", label="Reg", display="anatomy", outlines="both",
+                maps=[MapEntry(subject="sub-01", path=anatomy, underlay=boldref,
+                               surface_affine=shift, variant="bold"),
+                      MapEntry(subject="sub-01", path=anatomy, underlay=boldref,
+                               surface_frame="subject", variant="t1w"),
+                      MapEntry(subject="sub-01", path=anatomy, warp=True)],
+                variants=[Variant("bold", "BOLD"), Variant("t1w", "T1w")],
+            )
+            spec = _spec(
+                root, reports=[Report(id="r", label="R", endpoints=[endpoint])],
+                subject_space=SubjectSpace(
+                    templates={"sub-01": anatomy},
+                    coordinates={"sub-01": CoordinateMaps(field, field, stride=1)},
+                ),
+            )
+            out = build_viewer(spec, root / "viewer", quiet=True)
+            manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+            record = manifest["reports"][0]["endpoints"][0]
+            self.assertEqual(record["display"], "anatomy")
+            self.assertEqual(record["outlines"], "both")
+            bold, t1w, warp = record["maps"]
+            # Anatomy is stored as the underlays are, and never gets p curves.
+            self.assertEqual(nib.load(str(out / bold["path"])).get_data_dtype(), np.uint8)
+            self.assertNotIn("thresholds", bold)
+            self.assertEqual(bold["range"][0], 0.0)
+            # One underlay file however many maps share it.
+            self.assertEqual(bold["underlay"], t1w["underlay"])
+            self.assertTrue((out / bold["underlay"]).exists())
+            self.assertEqual(bold["surface_affine"], [[float(v) for v in row] for row in shift])
+            self.assertEqual(t1w["surface_frame"], "subject")
+            self.assertTrue(warp["warp"])
+            linear = np.array(manifest["subject_space"]["coords"]["sub-01"]["linear_from_template"]).reshape(4, 4)
+            # Fitted to the field when not given. The field is 2 ijk + 3 on a
+            # 2 mm grid (mm = 2 ijk), so in millimetres it is mm + 3.
+            np.testing.assert_allclose(linear[:3, :3], np.eye(3), atol=1e-6)
+            np.testing.assert_allclose(linear[:3, 3], [3.0, 3.0, 3.0], atol=1e-5)
+
+    def test_a_given_linear_part_is_used_as_is_and_bad_fields_are_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            anatomy = _write(np.ones((6, 6, 6)), root / "anat.nii.gz")
+            field = _write(np.ones((6, 6, 6, 3)), root / "field.nii.gz")
+            given = [[1, 0, 0, 1], [0, 1, 0, 2], [0, 0, 1, 3], [0, 0, 0, 1]]
+            spec = _spec(root, subject_space=SubjectSpace(
+                templates={"sub-01": anatomy},
+                coordinates={"sub-01": CoordinateMaps(field, field, stride=1, linear=given)}))
+            out = build_viewer(spec, root / "viewer", quiet=True)
+            manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["subject_space"]["coords"]["sub-01"]["linear_from_template"],
+                             [float(v) for row in given for v in row])
+            # A pure translation is its own rigid part.
+            np.testing.assert_allclose(manifest["subject_space"]["coords"]["sub-01"]["rigid_from_template"],
+                                       [float(v) for row in given for v in row], atol=1e-9)
+            # A scaled, rotated linear part: the rigid part is a rotation that
+            # agrees with the linear part at the brain's centre.
+            angle = np.radians(20)
+            rot = np.array([[np.cos(angle), -np.sin(angle), 0], [np.sin(angle), np.cos(angle), 0], [0, 0, 1]])
+            scaled = np.eye(4)
+            scaled[:3, :3] = rot @ np.diag([0.9, 1.1, 1.0])
+            scaled[:3, 3] = [4, -2, 7]
+            rigid = np.asarray(build._rigid(scaled.tolist(), CoordinateMaps(field, field, stride=1)))
+            np.testing.assert_allclose(rigid[:3, :3] @ rigid[:3, :3].T, np.eye(3), atol=1e-9)
+            self.assertAlmostEqual(np.linalg.det(rigid[:3, :3]), 1.0)
+            entry = spec.reports[0].endpoints[0].maps[0]
+            for bad in (dict(display="fancy"), dict(outlines="grey")):
+                with self.assertRaises(ValueError):
+                    _spec(root, reports=[Report(id="r", label="R", endpoints=[
+                        Endpoint(id="e", label="E", maps=[entry], **bad)])]).check()
+            with self.assertRaises(ValueError):
+                _spec(root, reports=[Report(id="r", label="R", endpoints=[
+                    Endpoint(id="e", label="E", maps=[MapEntry(subject="sub-01", path=entry.path,
+                                                               warp=True)])])]).check()
+
+    def test_an_image_stack_reaches_the_manifest_with_a_canvas(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rng = np.random.default_rng(6)
+            anatomy = _write(rng.random((12, 12, 12)) * 100 + 1, root / "anat.nii.gz")
+            boldref = _write(rng.random((6, 6, 6)) * 50 + 1, root / "boldref.nii.gz")
+            ijk = np.stack(np.meshgrid(*[np.arange(12.0)] * 3, indexing="ij"), -1)
+            field = _write(2.0 * ijk + 3.0, root / "field.nii.gz")
+            shift = [[1, 0, 0, 5], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]
+            base = _spec(root)
+            images = (AnatomyImage("bold", "boldref", boldref, frame="affine", affine=shift),
+                      AnatomyImage("t1", "T1", anatomy),
+                      AnatomyImage("mni", "MNI", base.template, frame="template"))
+            endpoint = Endpoint(id="reg", label="Reg", display="anatomy", maps=[
+                MapEntry(subject="sub-01", path=anatomy, feature=f"run {run}", images=images)
+                for run in (1, 2)])
+            spec = _spec(root, reports=[Report(id="r", label="R", endpoints=[endpoint])],
+                         subject_space=SubjectSpace(
+                             templates={"sub-01": anatomy},
+                             coordinates={"sub-01": CoordinateMaps(field, field, stride=1)}))
+            out = build_viewer(spec, root / "viewer", quiet=True)
+            manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+            first, second = manifest["reports"][0]["endpoints"][0]["maps"]
+            self.assertEqual([i["frame"] for i in first["images"]], ["affine", "subject", "template"])
+            self.assertEqual(first["images"][0]["affine"], [[float(v) for v in row] for row in shift])
+            self.assertTrue(all(i["range"][1] > 0 for i in first["images"]))
+            # Written once: both runs share the images, the map file and the canvas.
+            self.assertEqual(first["images"], second["images"])
+            self.assertEqual(first["path"], second["path"])
+            self.assertEqual(first["underlay"], second["underlay"])
+            canvas = nib.load(str(out / first["underlay"]))
+            self.assertEqual(int(np.asarray(canvas.dataobj).max()), 0)
+            # A stack needs an anatomy endpoint and the subject's coordinates.
+            with self.assertRaises(ValueError):
+                _spec(root, reports=[Report(id="r", label="R", endpoints=[Endpoint(
+                    id="e", label="E", maps=[MapEntry(subject="sub-01", path=anatomy, images=images)])])],
+                    subject_space=spec.subject_space).check()
+            with self.assertRaises(ValueError):
+                _spec(root, reports=[Report(id="r", label="R", endpoints=[Endpoint(
+                    id="e", label="E", display="anatomy",
+                    maps=[MapEntry(subject="sub-01", path=anatomy, images=images)])])]).check()
 
     def test_a_rebuild_names_the_files_nothing_points_at_any_more(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -42,29 +42,56 @@ from __future__ import annotations
 from .build import PAGE, build_viewer
 from .spec import (
     About,
+    AnatomyImage,
     Atlas,
     CoordinateMaps,
     Endpoint,
     Features,
     MapEntry,
+    RegionRow,
+    RegionStats,
     Report,
     SubjectSpace,
+    Variant,
+    VariantControl,
+    VariantOption,
+    VariantToggle,
     ViewerSpec,
 )
+from .atlas_surface import (
+    add_atlas_parcellation,
+    add_atlas_parcellations,
+    fsl_atlas_labels,
+    table_labels,
+)
+from .freesurfer import export_freesurfer_subject, sample_volume_labels
 from .surfaces import export_surfaces, package_surfaces
 
 __all__ = [
     "About",
+    "AnatomyImage",
     "Atlas",
     "CoordinateMaps",
     "Endpoint",
     "Features",
     "MapEntry",
     "PAGE",
+    "RegionRow",
+    "RegionStats",
     "Report",
     "SubjectSpace",
+    "Variant",
+    "VariantControl",
+    "VariantOption",
+    "VariantToggle",
     "ViewerSpec",
+    "add_atlas_parcellation",
+    "add_atlas_parcellations",
+    "fsl_atlas_labels",
+    "table_labels",
     "build_viewer",
+    "export_freesurfer_subject",
     "export_surfaces",
     "package_surfaces",
+    "sample_volume_labels",
 ]

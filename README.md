@@ -6,6 +6,7 @@ Reusable fMRI utilities for:
 - fMRIPrep-based transforms
 - montage rendering
 - decoding/searchlight helpers
+- static web viewers for brain maps: volumes, surfaces, regions and registration checks
 
 ## Quick Start
 
@@ -37,6 +38,7 @@ Direct links:
 - [Voxelwise Encoding](docs/encoding.md)
 - [Chunked Encoding And Stitching](docs/encoding_chunked.md)
 - [Encoding Output Reference](docs/encoding_outputs.md)
+- [Result Viewer](docs/viewer.md)
 
 ## Example Outputs
 

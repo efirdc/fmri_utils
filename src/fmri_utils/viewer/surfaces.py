@@ -109,6 +109,22 @@ def face_keep_mask(base: np.ndarray, subset: np.ndarray):
     return keep.astype(np.uint8)
 
 
+def read_sulc(freesurfer_dir, subject: str, hemisphere: str, n: int):
+    """Per-vertex sulcal depth, positive in sulci, or None if it cannot be found."""
+    import nibabel as nb
+
+    if subject == FSAVERAGE:
+        values = nb.load(str(fsaverage_files()[f"sulc_{SIDES[hemisphere]}"])).darrays[0].data
+        return np.asarray(values, dtype=np.float32)
+    if freesurfer_dir is not None:
+        path = Path(freesurfer_dir) / subject / "surf" / f"{hemisphere}.sulc"
+        if path.exists():
+            values = np.asarray(nb.freesurfer.read_morph_data(str(path)), dtype=np.float32)
+            if values.size == n:
+                return values
+    return None
+
+
 def read_curvature(cortex, freesurfer_dir, subject: str, hemisphere: str, n: int):
     """Per-vertex curvature, positive in sulci, or None if it cannot be found."""
     if subject == FSAVERAGE:
@@ -256,6 +272,11 @@ def export_surfaces(
                         f"  {hemisphere} curvature: {float((curvature > 0).mean()):.0%} sulcal",
                         flush=True,
                     )
+                sulc = read_sulc(freesurfer_dir, subject, hemisphere, entry["n_vertices"])
+                if sulc is not None:
+                    name = f"{hemisphere}_sulc.bin"
+                    (out / name).write_bytes(sulc.astype(np.float32).tobytes(order="C"))
+                    entry["sulc"] = name
                 record["hemispheres"][hemisphere] = entry
 
         # ROI vertex sets, so the surface view can outline the same regions the
@@ -293,6 +314,15 @@ def export_surfaces(
                 record["rois"] = carried
             print(f"  ROIs unavailable: {error}; kept {len(carried)} from the last run", flush=True)
 
+        # Parcellations are written by a separate step (write_parcellation) into
+        # this record; a geometry re-export must not drop them.
+        previous = out / "surfaces.json"
+        if previous.exists():
+            kept = json.loads(previous.read_text(encoding="utf-8")).get("parcellations", {})
+            kept = {key: value for key, value in kept.items()
+                    if all((out / info["labels"]).exists() for info in value["hemispheres"].values())}
+            if kept:
+                record["parcellations"] = kept
         (out / "surfaces.json").write_text(json.dumps(record, indent=2), encoding="utf-8")
 
 
@@ -368,6 +398,10 @@ def package_surfaces(
                 relative = target_dir / f"{hemisphere}_curv.bin"
                 copy_binary(source / info["curvature"], output_root / relative)
                 hemisphere_entry["curvature"] = str(relative).replace("\\", "/")
+            if info.get("sulc"):
+                relative = target_dir / f"{hemisphere}_sulc.bin"
+                copy_binary(source / info["sulc"], output_root / relative)
+                hemisphere_entry["sulc"] = str(relative).replace("\\", "/")
             entry["hemispheres"][hemisphere] = hemisphere_entry
 
         for name, roi in record.get("rois", {}).items():
@@ -377,9 +411,27 @@ def package_surfaces(
                 "path": str(relative).replace("\\", "/"),
                 "n_vertices": roi["n_vertices"],
             }
+        # Parcellations (``parcellation.write_parcellation``): per-vertex labels
+        # and a shared boundary network per hemisphere, copied with their paths
+        # rebased into the packaged tree.
+        parcellations = {}
+        for atlas_id, parcellation in record.get("parcellations", {}).items():
+            packed = {key: value for key, value in parcellation.items() if key != "hemispheres"}
+            packed["hemispheres"] = {}
+            for hemisphere, info in parcellation["hemispheres"].items():
+                moved = dict(info)
+                for key in ("labels", "lines_index", "lines_weight", "lines_offsets"):
+                    relative = target_dir / "parcellations" / atlas_id / Path(info[key]).name
+                    copy_binary(source / info[key], output_root / relative)
+                    moved[key] = str(relative).replace("\\", "/")
+                packed["hemispheres"][hemisphere] = moved
+            parcellations[atlas_id] = packed
+        if parcellations:
+            entry["parcellations"] = parcellations
         catalogue[subject] = entry
         print(
-            f"{subject}: {len(entry['hemispheres'])} hemispheres, {len(entry['rois'])} rois",
+            f"{subject}: {len(entry['hemispheres'])} hemispheres, {len(entry['rois'])} rois, "
+            f"{len(parcellations)} parcellations",
             flush=True,
         )
 

@@ -26,6 +26,7 @@
 8. Distribute permutation fits: [Chunked Encoding And Stitching](encoding_chunked.md)
 9. Interpret encoding maps: [Encoding Output Reference](encoding_outputs.md)
 10. Rate story segments with an LLM and build regressors: [Story Ratings](story_ratings.md)
+11. Publish maps as a static web page: [Result Viewer](viewer.md)
 
 ## Visual Examples
 
