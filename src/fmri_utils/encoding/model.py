@@ -5,7 +5,6 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 from scipy.stats import norm
-from sklearn.linear_model import Ridge
 
 from .config import EncodingConfig
 from .data import EncodingRun, SubjectData
@@ -108,18 +107,84 @@ def _pca_train_apply(
     )
 
 
+def _base_columns(n_columns: int, config: EncodingConfig) -> np.ndarray:
+    """Lagged-matrix columns of the unpenalised base (see EncodingConfig)."""
+    k = config.unpenalized_features
+    if k == 0:
+        return np.zeros(0, dtype=int)
+    n_lags = len(config.lags) if config.lag_mode == "concat" else 1
+    width, remainder = divmod(n_columns, n_lags)
+    if remainder or k >= width:
+        raise ValueError(
+            "unpenalized_features={} needs fewer than the {} columns per lag".format(k, width)
+        )
+    return np.concatenate([lag * width + np.arange(k) for lag in range(n_lags)])
+
+
+def _split_base(
+    x_train: np.ndarray, x_other: np.ndarray, config: EncodingConfig
+) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray], Optional[np.ndarray]]:
+    """Separate standardized features into the penalised part and the base."""
+    base = _base_columns(x_train.shape[1], config)
+    if base.size == 0:
+        return x_train, x_other, None, None
+    rest = np.setdiff1d(np.arange(x_train.shape[1]), base)
+    return x_train[:, rest], x_other[:, rest], x_train[:, base], x_other[:, base]
+
+
+def _fit_base(
+    base_train: Optional[np.ndarray], y_train: np.ndarray, base_other: Optional[np.ndarray]
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Least-squares base fit: training residuals and the base's other-row prediction."""
+    if base_train is None:
+        return y_train, np.zeros((0 if base_other is None else base_other.shape[0], 0))
+    weights = np.linalg.pinv(np.asarray(base_train, dtype=np.float64)) @ np.asarray(y_train, dtype=np.float64)
+    residual = np.asarray(y_train - base_train @ weights, dtype=np.float32)
+    return residual, np.asarray(base_other @ weights, dtype=np.float32)
+
+
 def _fit_predict_ridge(
     x_train: np.ndarray,
     y_train: np.ndarray,
     x_test: np.ndarray,
     alpha: float,
 ) -> np.ndarray:
-    model = Ridge(alpha=float(alpha), fit_intercept=False, solver="svd")
-    model.fit(x_train, y_train)
-    prediction = model.predict(x_test)
-    if prediction.ndim == 1:
-        prediction = prediction[:, None]
-    return np.asarray(prediction, dtype=np.float32)
+    factorization = _RidgeSVD(x_train, x_test)
+    return factorization.predict(y_train, alpha)
+
+
+class _RidgeSVD:
+    """Reusable SVD ridge solver for many alphas and target chunks."""
+
+    def __init__(self, x_train: np.ndarray, x_test: np.ndarray):
+        u, singular, vt = np.linalg.svd(
+            np.asarray(x_train, dtype=np.float64), full_matrices=False
+        )
+        self.u_t = u.T
+        self.singular = singular
+        self.test_v = np.asarray(x_test, dtype=np.float64) @ vt.T
+
+    def project(self, y_train: np.ndarray) -> np.ndarray:
+        """``U^T y``: the alpha-independent part of every prediction."""
+        targets = np.asarray(y_train, dtype=np.float64)
+        if targets.ndim == 1:
+            targets = targets[:, None]
+        return self.u_t @ targets
+
+    def predict(self, y_train: np.ndarray, alpha: float,
+                projected: Optional[np.ndarray] = None) -> np.ndarray:
+        """Predict at one alpha; pass ``projected`` to reuse ``project(y_train)``."""
+        if projected is None:
+            projected = self.project(y_train)
+        denominator = self.singular**2 + float(alpha)
+        factors = np.divide(
+            self.singular,
+            denominator,
+            out=np.zeros_like(self.singular),
+            where=denominator > 0,
+        )
+        prediction = (self.test_v * factors[None, :]) @ projected
+        return np.asarray(prediction, dtype=np.float32)
 
 
 def _grid(config: EncodingConfig) -> List[Tuple[Optional[int], float]]:
@@ -145,8 +210,13 @@ def _select_grid_per_voxel(
         y_validation = _stack(runs, fold.validation, "bold")
         x_train_z, x_validation_z, _, _ = standardize_train_apply(x_train, x_validation)
         y_train_z, y_validation_z, _, _ = standardize_train_apply(y_train, y_validation)
+        x_train_z, x_validation_z, base_train, base_validation = _split_base(
+            x_train_z, x_validation_z, config
+        )
+        y_fit, base_prediction = _fit_base(base_train, y_train_z, base_validation)
 
         component_cache = {}
+        factor_cache = {}
         scores = np.full((len(candidates), y_train.shape[1]), np.nan, dtype=np.float32)
         for candidate_index, (components, alpha) in enumerate(candidates):
             if components not in component_cache:
@@ -154,7 +224,15 @@ def _select_grid_per_voxel(
                     x_train_z, x_validation_z, components
                 )
             x_fit, x_predict = component_cache[components]
-            prediction = _fit_predict_ridge(x_fit, y_train_z, x_predict, alpha)
+            if components not in factor_cache:
+                # One factorisation and one target projection per PCA size;
+                # each alpha is then only a rescaling of the singular values.
+                solver = _RidgeSVD(x_fit, x_predict)
+                factor_cache[components] = (solver, solver.project(y_fit))
+            solver, projected = factor_cache[components]
+            prediction = solver.predict(y_fit, alpha, projected=projected)
+            if base_prediction.size:
+                prediction = prediction + base_prediction
             scores[candidate_index] = voxelwise_correlation(y_validation_z, prediction)
         fold_scores.append(scores)
         fold_weights.append(max(y_validation.shape[0] - 3, 1))
@@ -199,9 +277,15 @@ def _fit_observed(
         y_test = _stack(runs, fold.test, "bold")
         x_train_z, x_test_z, _, _ = standardize_train_apply(x_train, x_test)
         y_train_z, y_test_z, y_mean, y_scale = standardize_train_apply(y_train, y_test)
-        prediction_z = np.zeros_like(y_test_z, dtype=np.float32)
+        x_train_z, x_test_z, base_train, base_test = _split_base(x_train_z, x_test_z, config)
+        y_fit, base_prediction = _fit_base(base_train, y_train_z, base_test)
+        prediction_z = (
+            base_prediction.copy() if base_prediction.size
+            else np.zeros_like(y_test_z, dtype=np.float32)
+        )
 
         component_cache = {}
+        factor_cache = {}
         for candidate_index, (components, alpha) in enumerate(candidates):
             target_mask = selected == candidate_index
             if not np.any(target_mask):
@@ -209,10 +293,11 @@ def _fit_observed(
             if components not in component_cache:
                 component_cache[components] = _pca_train_apply(x_train_z, x_test_z, components)
             x_fit, x_predict = component_cache[components]
-            candidate_prediction = _fit_predict_ridge(
-                x_fit, y_train_z, x_predict, alpha
+            if components not in factor_cache:
+                factor_cache[components] = _RidgeSVD(x_fit, x_predict)
+            prediction_z[:, target_mask] += factor_cache[components].predict(
+                y_fit[:, target_mask], alpha
             )
-            prediction_z[:, target_mask] = candidate_prediction[:, target_mask]
             outer_alpha[fold_index, target_mask] = alpha
             outer_pca[fold_index, target_mask] = 0 if components is None else components
 
@@ -376,6 +461,7 @@ def fit_encoding(
             "ridge_alphas": list(config.ridge_alphas),
             "pca_components": [value if value is not None else 0 for value in config.pca_components],
             "pca_zero_means_disabled": True,
+            "unpenalized_features": config.unpenalized_features,
             "fisher_z_selection": config.fisher_z_selection,
             "n_permutations": config.n_permutations,
             "permutation_method": "within_run_block_shuffle_lagged_features",

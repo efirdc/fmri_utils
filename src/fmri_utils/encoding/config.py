@@ -21,12 +21,20 @@ class EncodingConfig:
     A value of ``None`` in ``pca_components`` means that PCA is skipped for
     that grid point. Hyperparameters are selected independently per voxel from
     inner-fold prediction correlations.
+
+    ``unpenalized_features`` marks the first ``k`` columns of every run's
+    feature matrix (at every lag) as a base fitted by ordinary least squares.
+    Within each training fold the base is fitted first; PCA and ridge on the
+    remaining columns then fit what it leaves, and a prediction is the sum of
+    the two. Use it for a few strong regressors -- an event's on/off response,
+    say -- that would otherwise be shrunk along with many weak ones.
     """
 
     lags: Tuple[int, ...] = (2, 3, 4, 5)
     lag_mode: str = "concat"
     ridge_alphas: Tuple[float, ...] = DEFAULT_RIDGE_ALPHAS
     pca_components: Tuple[Optional[int], ...] = (None,)
+    unpenalized_features: int = 0
     fisher_z_selection: bool = True
     nuisance_columns: Tuple[str, ...] = ()
     add_run_intercept: bool = True
@@ -64,6 +72,8 @@ class EncodingConfig:
             )
         if self.outer_splits < 2 or self.inner_splits < 2:
             raise ValueError("outer_splits and inner_splits must both be >= 2")
+        if self.unpenalized_features < 0:
+            raise ValueError("unpenalized_features must be >= 0")
         if self.embargo_rows < 0:
             raise ValueError("embargo_rows must be >= 0")
         if self.mask_strategy not in {

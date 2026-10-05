@@ -28,6 +28,7 @@ from fmri_utils.encoding import (
 )
 from fmri_utils.encoding.features import build_lagged_features, load_feature_matrix
 from fmri_utils.encoding.preprocessing import residualize_run, voxelwise_r2
+from fmri_utils.encoding.model import _fit_predict_ridge
 
 
 def _save_nifti(path: Path, values: np.ndarray) -> None:
@@ -229,6 +230,41 @@ class EncodingModelTests(unittest.TestCase):
             self.assertEqual(metadata["cv_scheme"], "leave_one_run_out")
             self.assertEqual(len(metadata["folds"]), 4)
 
+    def _strong_plus_weak(self) -> SubjectData:
+        """One strong regressor (column 0) among many weak or irrelevant ones."""
+        rng = np.random.default_rng(11)
+        runs = []
+        for index in range(4):
+            features = rng.normal(size=(60, 40)).astype(np.float32)
+            bold = 3.0 * features[:, :1] + 0.3 * features[:, 1:2] + rng.normal(scale=0.5, size=(60, 1))
+            runs.append(EncodingRun(run_id="run-{}".format(index + 1), features=features,
+                                    bold=bold.astype(np.float32),
+                                    nuisance=np.empty((60, 0), dtype=np.float32),
+                                    source_rows=np.arange(60)))
+        reference = nib.Nifti1Image(np.zeros((1, 1, 1), dtype=np.float32), np.eye(4))
+        return SubjectData(subject_id="sub-001", runs=runs, mask=np.ones((1, 1, 1), dtype=bool),
+                           reference_image=reference, voxel_indices=np.arange(1))
+
+    def test_unpenalized_base_escapes_shrinkage(self) -> None:
+        subject = self._strong_plus_weak()
+        # A penalty strong enough to flatten every column when all are penalised.
+        shrunk = EncodingConfig(lags=(0,), ridge_alphas=(1.0e5,))
+        based = EncodingConfig(lags=(0,), ridge_alphas=(1.0e5,), unpenalized_features=1)
+        plain = fit_encoding(subject, shrunk)
+        with_base = fit_encoding(subject, based)
+        self.assertGreater(float(with_base.mean_correlation[0]), 0.95)
+        # Correlation is scale-free, so compare fitted amplitude via R2.
+        self.assertGreater(float(with_base.mean_r2[0]), float(plain.mean_r2[0]) + 0.5)
+        self.assertEqual(with_base.metadata["unpenalized_features"], 1)
+
+    def test_unpenalized_base_is_taken_from_every_lag(self) -> None:
+        from fmri_utils.encoding.model import _base_columns
+
+        config = EncodingConfig(lags=(1, 2, 3), unpenalized_features=2)
+        np.testing.assert_array_equal(_base_columns(15, config), [0, 1, 5, 6, 10, 11])
+        with self.assertRaises(ValueError):
+            _base_columns(6, EncodingConfig(lags=(1, 2, 3), unpenalized_features=2))
+
     def test_grouped_run_kfold_keeps_runs_whole(self) -> None:
         subject = self._subject()
         config = EncodingConfig(
@@ -287,6 +323,19 @@ class EncodingModelTests(unittest.TestCase):
         result = fit_encoding(subject, config)
         self.assertEqual(result.outer_fold_correlation.shape, (4, 3))
         self.assertTrue(np.all(result.mean_correlation > 0.8))
+
+    def test_reusable_svd_ridge_matches_closed_form(self) -> None:
+        rng = np.random.default_rng(41)
+        x_train = rng.normal(size=(30, 7)).astype(np.float32)
+        y_train = rng.normal(size=(30, 5)).astype(np.float32)
+        x_test = rng.normal(size=(9, 7)).astype(np.float32)
+        alpha = 3.5
+        actual = _fit_predict_ridge(x_train, y_train, x_test, alpha)
+        expected = x_test @ np.linalg.solve(
+            x_train.T @ x_train + alpha * np.eye(x_train.shape[1]),
+            x_train.T @ y_train,
+        )
+        np.testing.assert_allclose(actual, expected, rtol=2e-5, atol=2e-5)
 
 
 class EncodingChunkTests(unittest.TestCase):
