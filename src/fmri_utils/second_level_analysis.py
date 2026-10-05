@@ -27,6 +27,8 @@ from nilearn.glm import threshold_stats_img
 from nilearn.glm.second_level import non_parametric_inference
 from nilearn.glm.second_level import SecondLevelModel
 
+from .image_io import save_float32_image
+
 
 @dataclass(frozen=True)
 class SecondLevelOutputs:
@@ -494,6 +496,7 @@ def second_level_one_sample_ttest(
         *,
         out_path: Path,
         two_sided: bool,
+        threshold_img=None,
         mask_img: Optional[nib.Nifti1Image] = None,
     ):
         if out_path.exists() and not overwrite:
@@ -507,7 +510,7 @@ def second_level_one_sample_ttest(
             mask_data = np.asanyarray(mask_img.dataobj)
             if mask_data.size == 0 or int(np.count_nonzero(mask_data)) == 0:
                 empty = image.new_img_like(stat_img, np.zeros(stat_img.shape, dtype=np.float32))
-                empty.to_filename(str(out_path))
+                save_float32_image(empty, out_path)
                 return empty
             stat_data = np.asanyarray(stat_img.dataobj)
             masked = stat_data[mask_data.astype(bool)]
@@ -518,12 +521,12 @@ def second_level_one_sample_ttest(
         finite = masked[np.isfinite(masked)]
         if finite.size == 0:
             empty = image.new_img_like(stat_img, np.zeros(stat_img.shape, dtype=np.float32))
-            empty.to_filename(str(out_path))
+            save_float32_image(empty, out_path)
             return empty
         # If all finite values are exactly zero, thresholding is meaningless and may produce inf thresholds.
         if float(np.max(np.abs(finite))) == 0.0:
             empty = image.new_img_like(stat_img, np.zeros(stat_img.shape, dtype=np.float32))
-            empty.to_filename(str(out_path))
+            save_float32_image(empty, out_path)
             return empty
 
         # Fire forwards unknown CLI args into **threshold_kwargs, so validate against nilearn's
@@ -552,8 +555,9 @@ def second_level_one_sample_ttest(
                     "Your nilearn threshold_stats_img does not support mask_img=. "
                     "Upgrade nilearn to enable tail-masked one-sided thresholding."
                 )
+        threshold_source = threshold_img if threshold_img is not None else stat_img
         try:
-            thr_img, _ = threshold_stats_img(stat_img, **kwargs_local)
+            thresholded_source, _ = threshold_stats_img(threshold_source, **kwargs_local)
         except ValueError as e:
             # nilearn can still raise on some edge cases (e.g. threshold=inf or empty data after
             # internal resampling/masking), with an error like:
@@ -561,13 +565,19 @@ def second_level_one_sample_ttest(
             msg = str(e).lower()
             if "zero-size array" in msg and "maximum" in msg:
                 empty = image.new_img_like(stat_img, np.zeros(stat_img.shape, dtype=np.float32))
-                empty.to_filename(str(out_path))
+                save_float32_image(empty, out_path)
                 return empty
             raise
+        thresholded_data = np.asarray(thresholded_source.dataobj)
+        stat_data = np.asarray(stat_img.dataobj, dtype=np.float32)
+        keep = np.isfinite(thresholded_data) & (thresholded_data != 0)
+        output_data = np.zeros(stat_data.shape, dtype=np.float32)
+        output_data[keep] = stat_data[keep]
+        thr_img = image.new_img_like(stat_img, output_data, copy_header=False)
         if mask_img is not None:
             # Ensure saved thresholded maps are spatially restricted to the provided mask.
             thr_img = _apply_binary_mask_to_stat_img(thr_img, mask_img)
-        thr_img.to_filename(str(out_path))
+        save_float32_image(thr_img, out_path)
         return thr_img
 
     def _cluster_extent_filter(mask_bool: np.ndarray, k_min: int) -> np.ndarray:
@@ -608,7 +618,7 @@ def second_level_one_sample_ttest(
                 fixed_img = image.new_img_like(cached, fixed, copy_header=False)
                 if mask_img is not None:
                     fixed_img = _apply_binary_mask_to_stat_img(fixed_img, mask_img)
-                fixed_img.to_filename(str(out_path))
+                save_float32_image(fixed_img, out_path)
                 return fixed_img
             return cached
 
@@ -626,7 +636,7 @@ def second_level_one_sample_ttest(
         finite_vals = stat_data[valid]
         if finite_vals.size == 0 or float(np.max(np.abs(finite_vals))) == 0.0:
             empty = image.new_img_like(stat_img, np.zeros(stat_img.shape, dtype=np.float32))
-            empty.to_filename(str(out_path))
+            save_float32_image(empty, out_path)
             return empty
 
         supra = valid & (np.abs(stat_data) >= t_crit)
@@ -643,7 +653,7 @@ def second_level_one_sample_ttest(
         thr_img = image.new_img_like(stat_img, out, copy_header=False)
         if mask_img is not None:
             thr_img = _apply_binary_mask_to_stat_img(thr_img, mask_img)
-        thr_img.to_filename(str(out_path))
+        save_float32_image(thr_img, out_path)
         return thr_img
 
     # ---- Design matrix (intercept + optional covariates) ----
@@ -663,7 +673,11 @@ def second_level_one_sample_ttest(
         design_matrix = pd.DataFrame({"intercept": np.ones(len(map_paths))})
 
     # Fit a parametric GLM once for (a) parametric inference and (b) QC t-maps in non-parametric mode.
-    slm = SecondLevelModel(smoothing_fwhm=smoothing_fwhm, mask_img=resolved_mask_img)
+    slm = SecondLevelModel(
+        smoothing_fwhm=smoothing_fwhm,
+        mask_img=resolved_mask_img,
+        minimize_memory=False,
+    )
     slm = slm.fit(second_level_input, design_matrix=design_matrix)
     n_subjects = int(len(map_paths))
     design_rank = int(np.linalg.matrix_rank(design_matrix.to_numpy(dtype=float)))
@@ -751,13 +765,26 @@ def second_level_one_sample_ttest(
         if validity_mask_img is not None:
             validity_mask_img.to_filename(str(masks_dir / "analysis_mask_validity_std.nii.gz"))
 
-        # Unthresholded t-map
+        # Compute all inferential maps once. Multiplicity correction uses the
+        # normal/z map, while compatibility thresholded outputs retain t values.
         t_unc_path = reg_dir / f"tmap_unc{transformation_tag}.nii.gz"
-        if t_unc_path.exists() and not overwrite:
+        z_unc_path = reg_dir / f"zmap_unc{transformation_tag}.nii.gz"
+        effect_path = reg_dir / f"effect_size{transformation_tag}.nii.gz"
+        effect_variance_path = reg_dir / f"effect_variance{transformation_tag}.nii.gz"
+        p_value_path = reg_dir / f"p_value{transformation_tag}.nii.gz"
+        inferential_paths = (t_unc_path, z_unc_path, effect_path, effect_variance_path, p_value_path)
+        if all(path.exists() for path in inferential_paths) and not overwrite:
             t_scores_img = image.load_img(str(t_unc_path))
+            z_scores_img = image.load_img(str(z_unc_path))
         else:
-            t_scores_img = slm.compute_contrast(reg_name, output_type="stat")
-            t_scores_img.to_filename(str(t_unc_path))
+            contrast_maps = slm.compute_contrast(reg_name, output_type="all")
+            t_scores_img = contrast_maps["stat"]
+            z_scores_img = contrast_maps["z_score"]
+            save_float32_image(t_scores_img, t_unc_path)
+            save_float32_image(z_scores_img, z_unc_path)
+            save_float32_image(contrast_maps["effect_size"], effect_path)
+            save_float32_image(contrast_maps["effect_variance"], effect_variance_path)
+            save_float32_image(contrast_maps["p_value"], p_value_path)
 
         for unc_p in unc_p_threshold_values:
             unc_p_tag = str(float(unc_p)).replace(".", "p")
@@ -786,6 +813,7 @@ def second_level_one_sample_ttest(
                 t_scores_img,
                 out_path=thresholded_two_sided_path,
                 two_sided=True,
+                threshold_img=z_scores_img,
                 mask_img=(resolved_mask_img if bool(use_mask_in_thresholding) else None),
             )
             thresholded_gt_path = reg_dir / f"tmap_{height_control}_alpha{alpha_tag}_k{int(cluster_threshold)}{transformation_tag}_gt_onesided.nii.gz"
@@ -793,14 +821,17 @@ def second_level_one_sample_ttest(
                 t_scores_img,
                 out_path=thresholded_gt_path,
                 two_sided=False,
+                threshold_img=z_scores_img,
                 mask_img=(resolved_mask_img if bool(use_mask_in_thresholding) else None),
             )
             t_flipped = image.math_img("-img", img=t_scores_img)
+            z_flipped = image.math_img("-img", img=z_scores_img)
             thresholded_lt_path = reg_dir / f"tmap_{height_control}_alpha{alpha_tag}_k{int(cluster_threshold)}{transformation_tag}_lt_onesided.nii.gz"
             thresholded_lt_map = _threshold_and_cache(
                 t_flipped,
                 out_path=thresholded_lt_path,
                 two_sided=False,
+                threshold_img=z_flipped,
                 mask_img=(resolved_mask_img if bool(use_mask_in_thresholding) else None),
             )
 
@@ -869,7 +900,7 @@ def second_level_one_sample_ttest(
             logp_gt_img = _select_logp(logp_gt_ret)
             t_gt_img = _extract_t(logp_gt_ret) or t_scores_img
             try:
-                logp_gt_img.to_filename(str(raw_dir / f"logp_vfwe_alpha{alpha_tag}{tfce_tag}{cfp_tag}_gt.nii.gz"))
+                save_float32_image(logp_gt_img, raw_dir / f"logp_vfwe_alpha{alpha_tag}{tfce_tag}{cfp_tag}_gt.nii.gz")
             except Exception:
                 pass
             gt_mask = np.asarray(logp_gt_img.dataobj) >= logp_thr
@@ -878,14 +909,14 @@ def second_level_one_sample_ttest(
                 t_gt_img, np.where(gt_mask & (t_gt_data > 0), t_gt_data, 0.0), copy_header=True
             )
             thresholded_gt_path = reg_dir / f"tmap_vfwe_alpha{alpha_tag}{tfce_tag}{cfp_tag}{transformation_tag}_gt_onesided.nii.gz"
-            thresholded_gt_map.to_filename(str(thresholded_gt_path))
+            save_float32_image(thresholded_gt_map, thresholded_gt_path)
 
             # Two-sided
             logp_two_ret = _np_logp(True, c_pos)
             logp_two_img = _select_logp(logp_two_ret)
             t_two_img = _extract_t(logp_two_ret) or t_scores_img
             try:
-                logp_two_img.to_filename(str(raw_dir / f"logp_vfwe_alpha{alpha_tag}{tfce_tag}{cfp_tag}_two_sided.nii.gz"))
+                save_float32_image(logp_two_img, raw_dir / f"logp_vfwe_alpha{alpha_tag}{tfce_tag}{cfp_tag}_two_sided.nii.gz")
             except Exception:
                 pass
             two_mask = np.asarray(logp_two_img.dataobj) >= logp_thr
@@ -894,14 +925,14 @@ def second_level_one_sample_ttest(
                 t_two_img, np.where(two_mask, t_two_data, 0.0), copy_header=True
             )
             thresholded_two_sided_path = reg_dir / f"tmap_vfwe_alpha{alpha_tag}{tfce_tag}{cfp_tag}{transformation_tag}.nii.gz"
-            thresholded_two_sided_map.to_filename(str(thresholded_two_sided_path))
+            save_float32_image(thresholded_two_sided_map, thresholded_two_sided_path)
 
             # lt (one-sided), output positive values
             logp_lt_ret = _np_logp(False, c_neg)
             logp_lt_img = _select_logp(logp_lt_ret)
             t_lt_img = _extract_t(logp_lt_ret) or t_scores_img
             try:
-                logp_lt_img.to_filename(str(raw_dir / f"logp_vfwe_alpha{alpha_tag}{tfce_tag}{cfp_tag}_lt.nii.gz"))
+                save_float32_image(logp_lt_img, raw_dir / f"logp_vfwe_alpha{alpha_tag}{tfce_tag}{cfp_tag}_lt.nii.gz")
             except Exception:
                 pass
             lt_mask = np.asarray(logp_lt_img.dataobj) >= logp_thr
@@ -910,7 +941,7 @@ def second_level_one_sample_ttest(
                 t_lt_img, np.where(lt_mask & (t_lt_data < 0), -t_lt_data, 0.0), copy_header=True
             )
             thresholded_lt_path = reg_dir / f"tmap_vfwe_alpha{alpha_tag}{tfce_tag}{cfp_tag}{transformation_tag}_lt_onesided.nii.gz"
-            thresholded_lt_map.to_filename(str(thresholded_lt_path))
+            save_float32_image(thresholded_lt_map, thresholded_lt_path)
 
             base_stem = f"tmap_vfwe_alpha{alpha_tag}{tfce_tag}{cfp_tag}{transformation_tag}"
             base_title = f"{reg_name}: t-map (vfwe, alpha={alpha})"
