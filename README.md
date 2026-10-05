@@ -9,7 +9,7 @@ Reusable fMRI utilities for:
 - decoding/searchlight helpers
 - static web viewers for brain maps: volumes, surfaces, regions and registration checks
 - LLM ratings of stories, and text features (language models) on a scanner clock
-- the LeBel et al. (2023) pipeline: stimulus and cross-participant encoding, and rating ablations
+- encoding on column data (run tables), annotation ablations, cross-participant encoding, group inference
 - web slide decks that embed the viewers, with an in-browser editor
 
 ## Quick Start
@@ -50,7 +50,10 @@ Direct links:
 - [Result Viewer](docs/viewer.md)
 - [Story Ratings](docs/story_ratings.md)
 - [Text Features](docs/features.md)
-- [LeBel 2023: Encoding Models And Rating Ablations](docs/lebel2023.md)
+- [Encoding On Column Data](docs/encoding_columns.md)
+- [Ablating An Annotation](docs/ablation.md)
+- [Cross-Participant Encoding](docs/cross_participant.md)
+- [Group Inference On Encoding Maps](docs/group_inference.md)
 - [Slide Decks](docs/slides.md)
 
 ## Example Outputs

@@ -16,6 +16,11 @@ cache entry from the same model and context flags ``extract`` was given, or
 from ``--entry`` directly. Kernels: ``hann``, ``gaussian``, ``boxcar`` and
 ``lanczos`` (normalised), and ``lanczos-sum``, the unnormalised resampler of
 the published LeBel/Huth features, for reproducing them.
+
+    # every stimulus of a stimulus table (stimulus, words, n_samples, tr, first_time), in one go
+    fmri-features build --stimuli stimuli.csv --source lm --model gpt2-xl --model-id gpt2xl         --layer 24 --pooling unit_word_last_mean --context 10 --output features/gpt2xl_l24_wordctx10
+    fmri-features build --stimuli stimuli.csv --source static --table english1000sm.hf5 --output features/english1000
+    fmri-features build --stimuli stimuli.csv --source rate --kernel hann --width 2 --output features/word_rate
 """
 
 from __future__ import annotations
@@ -116,7 +121,34 @@ def main(argv: list[str] | None = None) -> None:
                         help="also write units per second through the same kernel (.npy)")
     _spec_arguments(sample)
 
+    build = sub.add_parser("build", help="a feature space for every stimulus of a stimulus table")
+    build.add_argument("--stimuli", type=Path, required=True, help="CSV: stimulus, words, n_samples, tr, first_time")
+    build.add_argument("--source", choices=["lm", "static", "rate"], required=True)
+    build.add_argument("--output", type=Path, required=True, help="writes <output>/<stimulus>.npy")
+    build.add_argument("--table", type=Path, default=None, help="word-vector table (--source static)")
+    build.add_argument("--kernel", default=None, help="default: lanczos-sum (lm, static), hann (rate)")
+    build.add_argument("--width", type=float, default=None, help="rate kernel width in samples (default 2)")
+    build.add_argument("--cache-root", type=Path, default=None, help="cache the word embeddings (--source lm)")
+    build.add_argument("--device", default="")
+    build.add_argument("--overwrite", action="store_true")
+    _spec_arguments(build)
+
     args = parser.parse_args(argv)
+
+    if args.command == "build":
+        from . import batch
+        from .stimuli import read_stimuli
+        stimuli = read_stimuli(args.stimuli)
+        if args.source == "lm":
+            batch.language_model(stimuli, _spec(args), args.output, args.cache_root, args.kernel or "lanczos-sum",
+                                 args.device, args.overwrite)
+        elif args.source == "static":
+            if not args.table:
+                raise SystemExit("--source static needs --table")
+            batch.static(stimuli, args.table, args.output, args.kernel or "lanczos-sum")
+        else:
+            batch.rate(stimuli, args.output, args.kernel or "hann", 2.0 if args.width is None else args.width)
+        return
 
     if args.command == "extract":
         from . import cache

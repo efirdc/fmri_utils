@@ -309,3 +309,19 @@ with `gpt-5.6-luna`, covering 16,517 segments.
 
 Costs in run summaries come from a small published price table
 (`MODEL_PRICES_USD_PER_MTOK`); unknown models report `null` rather than a guess.
+
+## Regressors For Many Stimuli
+
+`fmri-story-ratings regressors` turns a rating run into one regressor file per
+stimulus, `<output>/<stimulus>.npy`. Each file has two columns: the rating's
+Lanczos sum (`load`) and the word rate. They are placed on each stimulus's
+sample clock from a [stimulus table](features.md#many-stimuli-at-once-the-stimulus-table).
+
+```bash
+fmri-story-ratings regressors --run ratings/my-run --stimuli stimuli.csv --field embodiment --output regressors/embodiment
+```
+
+The table's words must be the words that were rated: a segment's `first_word`
+indexes them. These files are the input format of
+[the ablation](ablation.md), which removes the rating, orthogonalised on the
+word rate, from a feature space or from other subjects' brains.

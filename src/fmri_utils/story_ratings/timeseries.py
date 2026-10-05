@@ -89,3 +89,39 @@ def ratings_to_timeseries(
 def scanner_sample_times(n_samples: int, tr_seconds: float, start_time: float = 0.0) -> np.ndarray:
     """Sample times at TR centres, the usual grid for an fMRI regressor."""
     return start_time + (np.arange(n_samples, dtype=float) + 0.5) * tr_seconds
+
+
+def segment_table(run_dir, story: str) -> pd.DataFrame:
+    """A rating run's per-segment table for one story (``segment_ratings.csv``, or the older ``utterance_ratings.csv``)."""
+    from pathlib import Path
+    for name in ("segment_ratings.csv", "utterance_ratings.csv"):
+        path = Path(run_dir) / story / name
+        if path.exists():
+            return pd.read_csv(path)
+    raise FileNotFoundError(f"no segment ratings for {story} under {run_dir}")
+
+
+def word_values(table: pd.DataFrame, n_words: int, field: str) -> np.ndarray:
+    """Each segment's ``field`` (or ``<field>_mean``) spread over the words it covers (``first_word``, ``n_words``)."""
+    column = field if field in table.columns else f"{field}_mean"
+    if column not in table.columns:
+        raise KeyError(f"no column {field} or {field}_mean")
+    values = np.full(n_words, np.nan)
+    for start, count, value in zip(table["first_word"], table["n_words"], table[column]):
+        start, stop = int(start), int(start) + int(count)
+        if start < 0 or stop > n_words:
+            raise ValueError(f"segment covers words {start}:{stop} of {n_words}: rate on the same word list")
+        values[start:stop] = float(value)
+    if np.isnan(values).any():
+        raise ValueError(f"{int(np.isnan(values).sum())} words are not in any segment")
+    return values
+
+
+def rating_regressors(words: Sequence[Word], table: pd.DataFrame, sample_times: Sequence[float], field: str,
+                      lanczos_window: int = 3) -> np.ndarray:
+    """(samples x 2): the field's word values Lanczos-summed at word midpoints (``load``), and the word
+    rate the same way (``word_rate``). No HRF; unnormalised, like Lanczos-summed text features."""
+    values = word_values(table, len(words), field)
+    midpoints = np.asarray([(float(w.onset) + float(w.offset)) / 2.0 for w in words])
+    weights = lanczos_weights(midpoints, np.asarray(sample_times, dtype=float), window=lanczos_window)
+    return np.column_stack([weights @ values, weights @ np.ones_like(values)]).astype(np.float32)

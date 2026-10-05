@@ -147,6 +147,24 @@ def run_render(args: argparse.Namespace) -> None:
     print(f"{path} ({size_kb:.0f} KB)")
 
 
+def run_regressors(args) -> None:
+    import numpy as np
+    from fmri_utils.features.stimuli import read_stimuli
+    from .timeseries import rating_regressors, segment_table
+    args.output.mkdir(parents=True, exist_ok=True)
+    built = {}
+    for stimulus in read_stimuli(args.stimuli):
+        if not any((args.run / stimulus.name / name).exists() for name in ("segment_ratings.csv", "utterance_ratings.csv")):
+            continue
+        values = rating_regressors(stimulus.read_words(), segment_table(args.run, stimulus.name), stimulus.sample_times, args.field)
+        np.save(args.output / f"{stimulus.name}.npy", values)
+        built[stimulus.name] = int(values.shape[0])
+    (args.output / "regressors.json").write_text(json.dumps(
+        {"columns": ["load", "word_rate"], "field": args.field, "run": str(args.run),
+         "timing": "word midpoints, Lanczos (window 3) sum onto each stimulus's samples, no HRF", "stimuli": built}, indent=1))
+    print(f"wrote {len(built)} stimuli to {args.output}", flush=True)
+
+
 def main(argv: Optional[Sequence[str]] = None) -> None:
     parser = argparse.ArgumentParser(prog="fmri-story-ratings", description="Rate story segments with an LLM.")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -162,6 +180,15 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     render_parser.add_argument("--title", default="Story Ratings")
     render_parser.add_argument("--eyebrow", default="LLM segment ratings")
     render_parser.set_defaults(func=run_render)
+
+    regressors_parser = subparsers.add_parser(
+        "regressors", help="a run's ratings as regressors on each stimulus's sample clock")
+    regressors_parser.add_argument("--run", type=Path, required=True, help="the rating run (<run>/<story>/segment_ratings.csv)")
+    regressors_parser.add_argument("--stimuli", type=Path, required=True,
+                                   help="stimulus table (fmri_utils.features.stimuli); its words must be the words rated")
+    regressors_parser.add_argument("--field", required=True, help="the rated field, e.g. tom (reads tom_mean)")
+    regressors_parser.add_argument("--output", type=Path, required=True, help="writes <output>/<stimulus>.npy (load, word_rate)")
+    regressors_parser.set_defaults(func=run_regressors)
 
     args = parser.parse_args(argv)
     args.func(args)

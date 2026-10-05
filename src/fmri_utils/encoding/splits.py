@@ -311,3 +311,20 @@ def selection_metadata(selection: Selection, runs: Sequence[EncodingRun]) -> Lis
         }
         for run, rows in zip(runs, selection)
     ]
+
+
+def fixed_test_plan(runs: Sequence[EncodingRun], inner_splits: int = 5) -> CVPlan:
+    """One outer fold: the last run is the fixed test; whole training runs (run i in fold i mod k)
+    are the inner folds that tune hyperparameters."""
+    if len(runs) < 4:
+        raise ValueError("a fixed test plan needs at least three training runs")
+    n_train = len(runs) - 1
+    k = min(int(inner_splits), n_train)
+    training = set(range(n_train))
+    inner = tuple(InnerFold(fold_id=f"run-validation-{f + 1:02d}",
+                            train=_whole_runs(runs, sorted(training - {i for i in range(n_train) if i % k == f})),
+                            validation=_whole_runs(runs, [i for i in range(n_train) if i % k == f]))
+                  for f in range(k))
+    outer = OuterFold(fold_id=f"test-{runs[-1].run_id}", train=_whole_runs(runs, sorted(training)),
+                      test=_whole_runs(runs, [n_train]), inner_folds=inner)
+    return CVPlan("fixed_test_run", (outer,))

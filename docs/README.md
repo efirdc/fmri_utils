@@ -19,7 +19,10 @@
 - [Text Features](features.md)
 - [Video Features](video_features.md)
 - [Result Viewer](viewer.md)
-- [LeBel 2023: Encoding Models And Rating Ablations](lebel2023.md)
+- [Encoding On Column Data](encoding_columns.md)
+- [Ablating An Annotation](ablation.md)
+- [Cross-Participant Encoding](cross_participant.md)
+- [Group Inference On Encoding Maps](group_inference.md)
 - [Slide Decks](slides.md)
 
 ## Typical Paths
@@ -37,8 +40,11 @@
 11. Rate story segments with an LLM and build regressors: [Story Ratings](story_ratings.md)
 12. Embed a transcript once, resample it any way: [Text Features](features.md)
 13. Publish maps as a static web page: [Result Viewer](viewer.md)
-14. Reproduce LeBel et al. (2023) encoding, cross-participant encoding and a rating ablation: [LeBel 2023](lebel2023.md)
-15. Present results in a web slide deck with live viewers: [Slide Decks](slides.md)
+14. Fit encoding models on released response matrices: [Encoding On Column Data](encoding_columns.md)
+15. Measure what a rating contributes to prediction: [Ablating An Annotation](ablation.md)
+16. Predict a subject from other subjects' brains: [Cross-Participant Encoding](cross_participant.md)
+17. Test encoding maps across subjects: [Group Inference](group_inference.md)
+18. Present results in a web slide deck with live viewers: [Slide Decks](slides.md)
 
 ## Visual Examples
 

@@ -33,7 +33,8 @@ dependencies = [
 
 [project.optional-dependencies]
 ratings = ["anthropic>=1.0", "openai>=2.0"]
-lebel = ["h5py", "fslpy"]
+hdf5 = ["h5py"]
+fsl = ["fslpy"]
 features = ["torch", "transformers"]
 
 [project.scripts]
@@ -45,7 +46,9 @@ fmri-story-ratings = "fmri_utils.story_ratings.cli:main"
 fmri-viewer = "fmri_utils.viewer.cli:main"
 fmri-features = "fmri_utils.features.cli:main"
 fmri-slides = "fmri_utils.slides.cli:main"
-fmri-lebel = "fmri_utils.lebel2023.cli:main"
+fmri-ablation = "fmri_utils.ablation:main"
+fmri-cross-participant = "fmri_utils.cross_participant:main"
+fmri-group-inference = "fmri_utils.group_inference:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

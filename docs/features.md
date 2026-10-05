@@ -132,9 +132,9 @@ rather than something mixed into every dimension.
 
 ## Validation
 
-Checked against the features behind the DATT_analysis LeBel 2023 encoding
-campaign (`scripts/lebel2023_repro/validate_feature_package.py`, results under
-`DATT/Cory/analysis/lebel2023_feature_validation/`).
+Checked against an independent extraction of the same features (the original
+analysis scripts of an encoding study on the LeBel et al. 2023 stories), per word
+and on the TR clock.
 
 **BERT** (`bert-base-uncased`, final layer, `unit_token_mean`, 10 words of
 context), on *adollshouse* (1,654 words) and the held-out test story:
@@ -160,3 +160,38 @@ context), on *adollshouse*:
 Speed on a laptop CPU: BERT takes about 45 s per story of ~1,700 words, and
 GPT-2 XL about 8 minutes. A GPU is worth having only for the larger models or
 for many stories.
+
+## Many Stimuli At Once: The Stimulus Table
+
+`fmri-features build` builds a feature space for every stimulus listed in a
+stimulus table (`features.stimuli`), writing `<output>/<stimulus>.npy` with one
+row per sample. The table is a CSV with one row per stimulus:
+
+| column | meaning |
+|---|---|
+| `stimulus` | its id, used as the output file name |
+| `words` | its word timings: a Praat TextGrid (word tier) or a word table (`.json`, `.csv`, `.tsv` with word/onset/offset) |
+| `n_samples` | samples on its response clock |
+| `tr` | seconds between samples |
+| `first_time` | time of the first sample, in the words' time base (default tr / 2) |
+
+Sample i is at `first_time + i * tr`, and words sit at their midpoints.
+
+```bash
+fmri-features build --stimuli stimuli.csv --source lm --model gpt2-xl --model-id gpt2xl --layer 24 \
+    --pooling unit_word_last_mean --context 10 --output features/gpt2xl_l24_wordctx10 --cache-root cache
+fmri-features build --stimuli stimuli.csv --source static --table english1000sm.hf5 --output features/english1000
+fmri-features build --stimuli stimuli.csv --source rate --kernel hann --width 2 --output features/word_rate
+```
+
+- `--source lm` embeds each word once with any model spec (cached with
+  `--cache-root`).
+- `--source static` looks words up in a word-vector table (`features.static`):
+  - HDF5 with `data` and `vocab`, as in English1000;
+  - `.npz` with `vectors` and `vocab`;
+  - GloVe text.
+- `--source rate` gives words per second through a kernel.
+- The default kernel for `lm` and `static` is `lanczos-sum`: the unnormalised
+  three-lobe Lanczos of the Huth/LeBel features, a rate-weighted sum. Pass a
+  normalised kernel (`hann`, `lanczos`) for an average instead, and add the rate
+  as its own column.

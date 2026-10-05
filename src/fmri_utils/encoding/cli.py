@@ -296,7 +296,43 @@ def build_parser() -> argparse.ArgumentParser:
     stitch.add_argument("--subject", help="Stitch one subject; default is all subjects.")
     stitch.set_defaults(func=_stitch)
 
+    fit_columns = subparsers.add_parser(
+        "fit-columns", help="Fit one subject's column chunk on a feature space (column data in a run table).")
+    fit_columns.add_argument("--run-table", required=True, type=Path, help="see encoding.run_table")
+    fit_columns.add_argument("--subject", required=True)
+    fit_columns.add_argument("--feature-root", required=True, type=Path, help="holding <feature>/<run>.npy")
+    fit_columns.add_argument("--feature", required=True)
+    fit_columns.add_argument("--output", required=True, type=Path, help="writes <output>/<model>/<subject>/chunks/")
+    fit_columns.add_argument("--model", default=None, help="output name (default: the feature)")
+    fit_columns.add_argument("--extra-root", type=Path, default=None,
+                             help="<run>.npy whose first column is appended after the PCA (a word rate, say)")
+    fit_columns.add_argument("--chunk", type=int, default=0)
+    fit_columns.add_argument("--n-chunks", type=int, default=1)
+    fit_columns.add_argument("--pca-components", type=int, default=256)
+    fit_columns.add_argument("--delays", default="1,2,3,4", help="FIR delays in samples")
+    fit_columns.set_defaults(func=_fit_columns)
+
+    stitch_columns = subparsers.add_parser("stitch-columns", help="A column fit's chunks -> maps through the run table's mask.")
+    stitch_columns.add_argument("--run-table", required=True, type=Path)
+    stitch_columns.add_argument("--subject", required=True)
+    stitch_columns.add_argument("--folder", required=True, type=Path, help="<output>/<model>/<subject>")
+    stitch_columns.set_defaults(func=_stitch_columns)
+
     return parser
+
+
+def _fit_columns(args) -> None:
+    from .columns import fit_feature_space
+    from .run_table import RunTable
+    fit_feature_space(RunTable(args.run_table), args.subject, args.feature_root, args.feature, args.output,
+                      model=args.model, extra_root=args.extra_root, chunk=args.chunk, n_chunks=args.n_chunks,
+                      pca_components=args.pca_components, delays=tuple(int(d) for d in args.delays.split(",")))
+
+
+def _stitch_columns(args) -> None:
+    from .columns import stitch
+    from .run_table import RunTable
+    stitch(RunTable(args.run_table), args.folder, args.subject)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> None:
