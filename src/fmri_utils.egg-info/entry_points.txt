@@ -1,5 +1,8 @@
 [console_scripts]
 fmri-encoding = fmri_utils.encoding.cli:main
+fmri-features = fmri_utils.features.cli:main
 fmri-registration-qc = fmri_utils.registration_qc:main
 fmri-registration-qc-manifest = fmri_utils.registration_qc_manifest:main
+fmri-story-ratings = fmri_utils.story_ratings.cli:main
 fmri-utils = fmri_utils.second_level_analysis:main
+fmri-viewer = fmri_utils.viewer.cli:main

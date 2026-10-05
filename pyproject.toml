@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fmri-utils"
-version = "0.4.0"
+version = "0.7.0"
 description = "Reusable fMRI utilities for encoding, group analysis, registration QC, montages, transforms, and decoding."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -28,10 +28,13 @@ dependencies = [
   "tqdm",
   "fire",
   "Pillow",
+  "templateflow",
 ]
 
 [project.optional-dependencies]
 ratings = ["anthropic>=1.0", "openai>=2.0"]
+lebel = ["h5py", "fslpy"]
+features = ["torch", "transformers"]
 
 [project.scripts]
 fmri-utils = "fmri_utils.second_level_analysis:main"
@@ -40,13 +43,17 @@ fmri-registration-qc-manifest = "fmri_utils.registration_qc_manifest:main"
 fmri-encoding = "fmri_utils.encoding.cli:main"
 fmri-story-ratings = "fmri_utils.story_ratings.cli:main"
 fmri-viewer = "fmri_utils.viewer.cli:main"
+fmri-features = "fmri_utils.features.cli:main"
+fmri-slides = "fmri_utils.slides.cli:main"
+fmri-lebel = "fmri_utils.lebel2023.cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
 include-package-data = true
 
 [tool.setuptools.package-data]
-"fmri_utils.viewer" = ["resources/*.html"]
+"fmri_utils.viewer" = ["resources/*.html", "resources/regfusion/*"]
+"fmri_utils.slides" = ["resources/*.html", "resources/*.js", "resources/*.css", "resources/vendor/*.js", "resources/vendor/katex/*", "resources/vendor/katex/fonts/*"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

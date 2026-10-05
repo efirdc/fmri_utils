@@ -9,3 +9,8 @@ scikit-learn
 tqdm
 fire
 Pillow
+templateflow
+
+[ratings]
+anthropic>=1.0
+openai>=2.0

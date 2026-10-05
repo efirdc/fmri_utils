@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: fmri-utils
-Version: 0.4.0
+Version: 0.6.0
 Summary: Reusable fMRI utilities for encoding, group analysis, registration QC, montages, transforms, and decoding.
 Classifier: Programming Language :: Python :: 3
 Classifier: Programming Language :: Python :: 3 :: Only
@@ -21,11 +21,16 @@ Requires-Dist: scikit-learn
 Requires-Dist: tqdm
 Requires-Dist: fire
 Requires-Dist: Pillow
+Requires-Dist: templateflow
+Provides-Extra: ratings
+Requires-Dist: anthropic>=1.0; extra == "ratings"
+Requires-Dist: openai>=2.0; extra == "ratings"
 
 # fmri_utils
 
 Reusable fMRI utilities for:
 - voxelwise stimulus-to-BOLD encoding analysis
+- explicit first-level and group-level Nilearn GLMs
 - second-level group analysis
 - fMRIPrep-based transforms
 - montage rendering
@@ -51,6 +56,10 @@ pip install -e .
 
 See [docs/README.md](docs/README.md) for the full docs index.
 
+New GLM analyses should use the focused [first-level](docs/first_level_glm.md) and
+[group-level](docs/group_level_glm.md) interfaces. The older combined second-level helper
+is retained for compatibility.
+
 Direct links:
 - [Installation](docs/installation.md)
 - [Second-level CLI](docs/second_level_cli.md)
@@ -59,6 +68,9 @@ Direct links:
 - [Registration QC](docs/registration_qc.md)
 - [Transformations](docs/transformations.md)
 - [Voxelwise Encoding](docs/encoding.md)
+- [Chunked Encoding And Stitching](docs/encoding_chunked.md)
+- [Encoding Output Reference](docs/encoding_outputs.md)
+- [Temporal Continuous Decoding](docs/temporal_decoding.md)
 
 ## Example Outputs
 
