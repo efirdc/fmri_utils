@@ -42,13 +42,20 @@ each subject's best-predicted 5% of voxels:
 
 | feature space | full r | Δr (ToM removed) | Δr as % of r |
 |---|---:|---:|---:|
-| English1000 | 0.264 | 0.0160 | 5.9% |
-| BERT (wordctx10) | 0.317 | 0.0165 | 5.3% |
-| GPT-2 XL (layer 24, wordctx10) | 0.339 | 0.0166 | 5.0% |
+| English1000 | 0.274 | 0.0152 | 5.4% |
+| BERT (wordctx10) | 0.324 | 0.0162 | 5.1% |
+| GPT-2 XL (layer 24, wordctx10) | 0.346 | 0.0161 | 4.8% |
 
 These are the "Lanczos + rate" models: Lanczos-summed features with a word-rate
 column. Δr was positive in all 24 subject-by-feature fits. Removing ToM takes
 2.95% of English1000's feature variance and 0.73% of BERT's and GPT-2 XL's.
+Per subject (top-5% r / Δr):
+
+| feature | UTS01 | UTS02 | UTS03 | UTS04 | UTS05 | UTS06 | UTS07 | UTS08 |
+|---|---|---|---|---|---|---|---|---|
+| English1000 | .290 / .0186 | .334 / .0228 | .389 / .0220 | .232 / .0088 | .222 / .0122 | .291 / .0165 | .228 / .0117 | .205 / .0092 |
+| BERT | .347 / .0196 | .394 / .0209 | .467 / .0190 | .289 / .0129 | .258 / .0121 | .321 / .0157 | .278 / .0120 | .242 / .0174 |
+| GPT-2 XL | .379 / .0190 | .421 / .0196 | .491 / .0176 | .286 / .0132 | .277 / .0104 | .356 / .0183 | .302 / .0127 | .253 / .0179 |
 
 With the optional null, removing an equally large random semantic direction
 costs 16-39% of that drop, so 61-84% of it is specific to ToM. The group t on
