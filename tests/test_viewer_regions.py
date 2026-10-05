@@ -220,6 +220,43 @@ class AtlasSurfaceTests(unittest.TestCase):
                                             self.regions[:2], smooth_rounds=0)
             self.assertEqual(len(record["regions"]), 2)
 
+    def test_registration_fusion_points_take_precedence_for_their_space(self) -> None:
+        # The sheet sits 100 mm off the atlas with a transform that would bring it back,
+        # but the export also carries per-vertex points in the atlas's space that put
+        # every vertex on the mirrored side: west vertices land in East and vice versa.
+        shift = [[1, 0, 0, 100.0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            folder = _grid_export(tmp, "fsaverage", offset=(-100.0, 0.0, 0.0), transform=shift)
+            white = np.frombuffer((folder / "lh_wm.bin").read_bytes(), dtype="<f4").reshape(-1, 3) + [100.0, 0, 0]
+            mirrored = white.copy()
+            mirrored[:, 0] = 18.0 - mirrored[:, 0]
+            mirrored[:, 2] = 1.0  # mid-thickness
+            (folder / "lh_volume_points_MNI152NLin6Asym.bin").write_bytes(mirrored.astype("<f4").tobytes())
+            record = json.loads((folder / "surfaces.json").read_text(encoding="utf-8"))
+            record["hemispheres"]["lh"]["volume_points"] = {"MNI152NLin6Asym": "lh_volume_points_MNI152NLin6Asym.bin"}
+            (folder / "surfaces.json").write_text(json.dumps(record), encoding="utf-8")
+            atlas = _split_atlas(tmp / "a.nii.gz")
+            with_points = add_atlas_parcellation(folder, "rf", "RF", atlas, self.regions[:2], smooth_rounds=0)
+            labels = np.frombuffer((folder / with_points["hemispheres"]["lh"]["labels"]).read_bytes(),
+                                   dtype="<i2").reshape(10, 10)
+            self.assertTrue((labels[:4] == 2).all() and (labels[6:] == 1).all())
+            # An atlas in another template ignores the points and keeps the transform route.
+            other = add_atlas_parcellation(folder, "aff", "Affine", atlas, self.regions[:2], smooth_rounds=0,
+                                           space="MNI152NLin2009cAsym")
+            labels = np.frombuffer((folder / other["hemispheres"]["lh"]["labels"]).read_bytes(),
+                                   dtype="<i2").reshape(10, 10)
+            self.assertTrue((labels[:4] == 1).all() and (labels[5:] == 2).all())
+
+    def test_registration_fusion_points_ship_with_the_package(self) -> None:
+        from fmri_utils.viewer.surfaces import registration_fusion_points
+        for hemisphere, sign in (("lh", -1), ("rh", 1)):
+            points = registration_fusion_points(hemisphere)
+            self.assertEqual(points.shape, (163842, 3))
+            self.assertTrue(np.isfinite(points).all())
+            # The left hemisphere sits at negative x in MNI152, the right at positive.
+            self.assertGreater(float((np.sign(points[:, 0]) == sign).mean()), 0.99)
+
     def test_region_lists_from_fsl_xml_and_tables(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)

@@ -35,6 +35,21 @@ MNI305_TO_MNI152 = [
     [0.0, 0.0, 0.0, 1.0],
 ]
 
+# Registration fusion (Wu et al. 2018, RF-ANTs): for each fsaverage vertex, its
+# coordinate in a volumetric template, built from 1,490 subjects' nonlinear
+# registrations at mid-thickness. A map in that template is sampled once per
+# vertex at these points instead of through MNI305_TO_MNI152; the affine route
+# is a median 2 mm away (resources/regfusion/README.md). Keyed by TemplateFlow
+# name, so points for other templates can sit beside these.
+REGFUSION = {"MNI152NLin6Asym": "{hemisphere}.MNI152NLin6Asym_rf.f32"}
+
+
+def registration_fusion_points(hemisphere: str, space: str = "MNI152NLin6Asym") -> np.ndarray:
+    """fsaverage (164k) vertices of one hemisphere in ``space``, millimetres, (n, 3) float32."""
+    path = Path(__file__).parent / "resources" / "regfusion" / REGFUSION[space].format(hemisphere=hemisphere)
+    return np.fromfile(path, dtype="<f4").reshape(-1, 3)
+
+
 _fsaverage_files = {}
 
 
@@ -277,6 +292,16 @@ def export_surfaces(
                     name = f"{hemisphere}_sulc.bin"
                     (out / name).write_bytes(sulc.astype(np.float32).tobytes(order="C"))
                     entry["sulc"] = name
+                if subject == FSAVERAGE:
+                    # Per-template sampling points, one per vertex in mesh order.
+                    entry["volume_points"] = {}
+                    for space in REGFUSION:
+                        points = registration_fusion_points(hemisphere, space)
+                        if points.shape[0] != entry["n_vertices"]:
+                            raise ValueError(f"{space} points: {points.shape[0]} for {entry['n_vertices']} vertices")
+                        name = f"{hemisphere}_volume_points_{space}.bin"
+                        (out / name).write_bytes(points.astype("<f4").tobytes(order="C"))
+                        entry["volume_points"][space] = name
                 record["hemispheres"][hemisphere] = entry
 
         # ROI vertex sets, so the surface view can outline the same regions the
@@ -402,6 +427,13 @@ def package_surfaces(
                 relative = target_dir / f"{hemisphere}_sulc.bin"
                 copy_binary(source / info["sulc"], output_root / relative)
                 hemisphere_entry["sulc"] = str(relative).replace("\\", "/")
+            # Registration-fusion points: {TemplateFlow space: float32 x,y,z per vertex}.
+            if info.get("volume_points"):
+                hemisphere_entry["volume_points"] = {}
+                for space, name in info["volume_points"].items():
+                    relative = target_dir / f"{hemisphere}_volume_points_{space}.bin"
+                    copy_binary(source / name, output_root / relative)
+                    hemisphere_entry["volume_points"][space] = str(relative).replace("\\", "/")
             entry["hemispheres"][hemisphere] = hemisphere_entry
 
         for name, roi in record.get("rois", {}).items():

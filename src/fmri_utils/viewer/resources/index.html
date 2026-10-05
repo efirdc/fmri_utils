@@ -22,6 +22,12 @@
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; }
+  /* Thin scrollbars in the page's own colours, not the platform's thick white bar. */
+  * { scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--line); border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--edge); }
   /* The viewer is a fixed frame, not a document: the toolbar and the status
      bar keep their size and the stage takes whatever is left, so a short
      window never grows a scrollbar that hides the controls or the readout. */
@@ -194,7 +200,13 @@
   }
   .seg button[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); }
   .seg button:disabled { opacity: 0.35; cursor: not-allowed; }
+  /* A participant left out of the group results: still selectable, marked by
+     style alone so the button's text (its accessible name) stays the ID. */
+  .seg button.excluded { font-style: italic; text-decoration: underline dotted; text-underline-offset: 3px; }
+  .cohort-note { font-size: 11.5px; color: var(--ink-muted); margin: 0; }
   input[type="range"] { width: 120px; accent-color: var(--accent); }
+  #cluster-min { width: 8ch; }
+  #threshold-value[data-tip] { text-decoration: underline dotted; text-underline-offset: 3px; cursor: help; }
   input[type="number"] {
     font: inherit; font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 12px;
     width: 11ch; padding: 4px 7px; border-radius: 6px; border: 1px solid var(--line);
@@ -224,6 +236,22 @@
     pointer-events: none; z-index: 20;
   }
   .hint:hover::after, .hint:focus-visible::after { opacity: 1; visibility: visible; }
+  /* Explanations are drawn by one fixed tooltip (#tip) above everything, so
+     the rail's scroll area cannot clip them and they show at once; the
+     per-element ::after versions are off. An option with an explanation is
+     underlined, so it can be found without hovering at random. */
+  .hint::after, .switch[data-tip]::after,
+  #variants .control > .label .hint::after { display: none !important; }
+  #tip {
+    position: fixed; z-index: 1000; pointer-events: none; max-width: 280px;
+    padding: 6px 8px; border-radius: 5px; background: #0C1218; color: #E6EDF3;
+    border: 1px solid var(--edge); font: 11.5px/1.4 "IBM Plex Sans", system-ui, sans-serif;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35); white-space: normal;
+  }
+  .seg button[data-tip]:not(:disabled) {
+    text-decoration: underline dotted; text-decoration-color: var(--ink-muted);
+    text-underline-offset: 3px;
+  }
   .dual { position: relative; width: 150px; height: 22px; flex: none; }
   .dual-track, .dual-fill {
     position: absolute; top: 9px; height: 4px; border-radius: 2px;
@@ -352,6 +380,10 @@
       <h1 id="title">Result Browser</h1>
       <p class="lede" id="lede"></p>
     </div>
+    <div class="group" id="cohort-field" hidden>
+      <span class="label">Participants</span><div class="seg" id="cohorts"></div>
+      <p class="cohort-note" id="cohort-note"></p>
+    </div>
     <div class="group"><span class="label">Report</span><div class="stack" id="reports"></div></div>
     <div class="group"><span class="label">Endpoint</span><div class="stack" id="endpoints"></div></div>
     <div class="group" id="feature-field">
@@ -445,6 +477,7 @@
           <button type="button" data-mode="value" aria-pressed="true">value</button>
           <button type="button" data-mode="p">p &lt;</button>
           <button type="button" data-mode="q">q &lt;</button>
+          <button type="button" data-mode="fwe" hidden>FWE &lt;</button>
         </div>
       </div>
       <div class="field" id="window-field">
@@ -455,6 +488,11 @@
           <div class="dual-knob" id="knob-max" tabindex="0" role="slider" aria-label="window maximum"></div>
         </div>
         <span class="value" id="threshold-value">—</span>
+      </div>
+      <div class="field" id="cluster-field">
+        <span class="label" title="minimum cluster size, in voxels of the map's own grid">Cluster ≥</span>
+        <input type="number" id="cluster-min" min="1" step="1" value="1"
+               title="hide suprathreshold voxels in clusters smaller than this (face-connected voxels of one sign, on the map's own grid); 1 shows every voxel">
       </div>
       <div class="field" id="mix-field" hidden>
         <span class="label">Blend</span>
@@ -735,6 +773,7 @@
    "outline-width-field", "smooth-shading", "share", "infobox", "infobox-close", "infobox-kicker",
    "infobox-title", "infobox-stats", "infobox-description", "infobox-related",
    "infobox-related-block", "infobox-attribution", "variant-field", "variants",
+   "cohort-field", "cohorts", "cohort-note",
    "display", "display-toggle", "display-close", "roi-colours", "roi-colour-field",
    "roi-labels", "roi-labels-field", "roi-smooth", "roi-smooth-value", "roi-smooth-field",
    "roi-specks", "roi-specks-field", "hemisphere-field", "display-surface",
@@ -742,7 +781,7 @@
    "loading-chip", "mix", "mix-value", "mix-field", "flicker", "warp", "warp-value", "warp-field",
    "contours", "contour-field", "foldings", "folding-field", "template-field", "template-morph",
    "template-value", "reg-space-field", "reg-spaces", "reg-space", "reg-image-field", "reg-images",
-   "reg-image", "reg-flicker"].forEach(function (id) {
+   "reg-image", "reg-flicker", "cluster-field", "cluster-min"].forEach(function (id) {
     el[id] = document.getElementById(id);
   });
 
@@ -841,13 +880,16 @@
     if (!canvas) return;
     var ratio = window.devicePixelRatio || 1;
     var width = canvas.clientWidth || 420;
-    var height = 34;
+    // Drawn for its CSS height (34 px by default); a host page that enlarges
+    // the canvas gets a proportionally larger bar, ticks and labels.
+    var height = canvas.clientHeight || 34;
+    var scale = height / 34;
     canvas.width = width * ratio;
     canvas.height = height * ratio;
     var ctx = canvas.getContext("2d");
     ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
     ctx.clearRect(0, 0, width, height);
-    var barHeight = 12;
+    var barHeight = Math.round(12 * scale);
     var style = getComputedStyle(document.body);
     var ink = style.getPropertyValue("--ink-muted").trim() || "#8697A7";
     var faded = state.blend === "soft";
@@ -874,7 +916,7 @@
     ctx.strokeStyle = style.getPropertyValue("--line").trim() || "#26313B";
     ctx.strokeRect(0.5, 0.5, width - 1, barHeight - 1);
     ctx.fillStyle = ink;
-    ctx.font = '10px "IBM Plex Mono", ui-monospace, monospace';
+    ctx.font = Math.round(10 * scale) + 'px "IBM Plex Mono", ui-monospace, monospace';
     ctx.textAlign = "center";
     // Ticks always; labels only where they will not overprint the one before,
     // because a low threshold on a wide window puts -floor, 0 and floor within
@@ -882,12 +924,12 @@
     var written = -Infinity;
     [-high, -floor, 0, floor, high].forEach(function (value) {
       var x = ((value + high) / (2 * high)) * (width - 1);
-      ctx.fillRect(x, barHeight, 1, 4);
+      ctx.fillRect(x, barHeight, Math.max(1, Math.round(scale)), Math.round(4 * scale));
       var text = format(value);
-      var at = Math.min(Math.max(x, 18), width - 18);
+      var at = Math.min(Math.max(x, 18 * scale), width - 18 * scale);
       var half = ctx.measureText(text).width / 2 + 3;
       if (at - half < written) return;
-      ctx.fillText(text, at, barHeight + 15);
+      ctx.fillText(text, at, barHeight + 15 * scale);
       written = at + half;
     });
   }
@@ -1167,6 +1209,27 @@
     return ys[ys.length - 1];
   }
 
+  // The conventional levels the builder stores exactly (assets.CONVENTIONAL_P
+  // and _Q); a level between stored points is interpolated.
+  var EXACT_LEVELS = { p: [0.1, 0.05, 0.02, 0.01, 0.005, 0.002, 0.001, 5e-4, 1e-4, 5e-5, 1e-5, 1e-6],
+                       q: [0.2, 0.1, 0.05, 0.02, 0.01, 0.005, 0.001] };
+
+  function levelTip(mode, grid, requested) {
+    var stored = EXACT_LEVELS[mode].filter(function (x) { return grid.indexOf(x) >= 0; });
+    var list = stored.map(function (x) {
+      return x >= 0.001 ? String(x).replace(/^0\./, ".") : x.toExponential();
+    }).join(", ");
+    var exact = grid.indexOf(requested) >= 0;
+    var how = mode === "p" ? "the analytic t for this p" : "this map's Benjamini-Hochberg cutoff";
+    if (exact) {
+      return "Exact: " + mode + " = " + requested + " is a stored level, so the cutoff is " + how +
+        "." + (list ? " Exact levels: " + list + "." : "");
+    }
+    return "Interpolated: " + mode + " = " + requested + " falls between stored levels, so the cutoff " +
+      "approximates " + how + " and can include or miss a borderline voxel. " +
+      (list ? "Exact levels: " + list + "." : "This map's curves predate the stored conventional levels.");
+  }
+
   function thresholdFor(entry) {
     var requested = parseFloat(el["threshold-input"].value);
     if (!isFinite(requested) || requested < 0) requested = 0;
@@ -1177,24 +1240,30 @@
       var level = Math.max(Math.min(requested, 1), 1e-12);
       return {
         floor: 0, sigMode: mode, sigFloor: -Math.log(level) / Math.LN10,
-        label: mode + "<" + requested + (sig.label ? " · " + sig.label : "")
+        label: (mode === "fwe" ? "FWE" : mode) + "<" + requested + (sig.label ? " · " + sig.label : ""),
+        tip: "Exact at any level: each voxel's own " + (sig.label ? sig.label + " " : "") +
+          (mode === "q" ? "q" : "p") + " is compared with it."
       };
     }
-    if (mode === "value" || !curves) {
+    if (mode === "value" || mode === "fwe" || !curves) {
       return { floor: requested, label: "≥ " + format(requested) };
     }
     if (mode === "p") {
       var tp = interpolateCurve(curves.p, curves.p_t, requested);
+      var exactP = curves.p.indexOf(requested) >= 0;
       return tp === null
         ? { floor: requested, label: "no curve" }
-        : { floor: tp, label: "p<" + requested + " → t ≥ " + format(tp) };
+        : { floor: tp, label: "p<" + requested + (exactP ? " → t ≥ " : " ≈ t ≥ ") + format(tp),
+            tip: levelTip("p", curves.p, requested) };
     }
     if (!curves.q) return { floor: requested, label: "no FDR curve" };
     var tq = interpolateCurve(curves.q, curves.q_t, requested);
+    var exactQ = curves.q.indexOf(requested) >= 0;
     if (tq === null || tq === undefined) {
-      return { floor: Infinity, label: "q<" + requested + ": no voxels survive" };
+      return { floor: Infinity, label: "q<" + requested + ": no voxels survive", tip: levelTip("q", curves.q, requested) };
     }
-    return { floor: tq, label: "q<" + requested + " → t ≥ " + format(tq) };
+    return { floor: tq, label: "q<" + requested + (exactQ ? " → t ≥ " : " ≈ t ≥ ") + format(tq),
+             tip: levelTip("q", curves.q, requested) };
   }
 
   // A fixed step is useless across p=0.05 and p=1e-9, so the arrows move by a
@@ -1273,7 +1342,7 @@
     var anatomy = isAnatomy();
     layer.style = {
       floor: picked.floor, high: windowMax(), soft: state.blend === "soft",
-      sigMode: picked.sigMode || null, sigFloor: picked.sigFloor,
+      sigMode: picked.sigMode || null, sigFloor: picked.sigFloor, clusterMin: clusterMinimum(),
       // An anatomy map is an image over its underlay: its opacity is the
       // blend, or all-or-nothing while it flickers.
       opacity: anatomy && !isStack(entry) ? (state.flicker ? (state.flickerShown ? 1 : 0) : state.mix)
@@ -1316,6 +1385,9 @@
     "uniform sampler3D uSig;",
     "uniform bool uHasSig;",
     "uniform float uSigFloor;",
+    // Suprathreshold voxels in clusters under the minimum size are 0 here.
+    "uniform sampler3D uKeep;",
+    "uniform bool uHasKeep;",
     "uniform mat3 uMapVox;",
     "uniform mat3 uMaskVox;",
     "uniform ivec3 uMapDims;",
@@ -1463,6 +1535,7 @@
     "      }",
     "      if (uHasBrain && texelFetch(uBrain, v, 0).r < 0.5) a = 0.0;",
     "      if (uHasSig && !(texelFetch(uSig, v, 0).r >= uSigFloor)) a = 0.0;",
+    "      if (uHasKeep && texelFetch(uKeep, v, 0).r < 0.5) a = 0.0;",
     "      vec3 c = value >= 0.0 ? ramp(uPos, m / uHigh) : ramp(uNeg, m / uHigh);",
     "      colour = vec4(c, a * uOpacity);",
     "    }",
@@ -1482,7 +1555,7 @@
     "}"
   ].join("\n");
 
-  var LAYER_UNIFORMS = ["uSig", "uHasSig", "uSigFloor", "uBrain", "uHasBrain", "uMap", "uMask", "uMapVox", "uMaskVox", "uMapDims", "uMaskDims", "uMaskScale",
+  var LAYER_UNIFORMS = ["uSig", "uHasSig", "uSigFloor", "uKeep", "uHasKeep", "uBrain", "uHasBrain", "uMap", "uMask", "uMapVox", "uMaskVox", "uMapDims", "uMaskDims", "uMaskScale",
     "uHasMap", "uHasMask", "uFloor", "uHigh", "uSoft", "uOpacity", "uRoiOpacity", "uPos",
     "uNeg", "uRoi", "uCross", "uCrossHalf", "uCrossOn", "uGray", "uGrayLo", "uGrayHi",
     "uWarp", "uSrc", "uDisp", "uToMM", "uLinear", "uDispTex", "uSrcTex", "uWarpAlpha",
@@ -1683,6 +1756,7 @@
                   gl.RED, gl.UNSIGNED_BYTE, data);
     gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    layer.brainData = data;
     layer.brainKey = key;
     layer.brainShared = layer.shared;
     return true;
@@ -1787,7 +1861,7 @@
     layer.sigSource = source;
     layer.sigs = source ? {} : null;
     if (!source) return;
-    ["p", "q"].forEach(function (mode) {
+    ["p", "q", "fwe"].forEach(function (mode) {
       if (!source[mode]) return;
       loadImage(source[mode]).then(function (image) {
         if (layer.sigSource !== source) return;
@@ -1810,6 +1884,83 @@
     }
     return "ready";
   }
+  // ---- minimum cluster size ----------------------------------------------------
+  // With k above 1, a voxel that passes the threshold shows only if it is in
+  // a cluster of at least k such voxels: face-connected (6 neighbours), with
+  // positive and negative values clustered apart, after the brain mask and
+  // any p or q companion. That is the rule of the permutation k >= 20 maps.
+  // Voxels under the threshold are left alone, so the soft blend still fades
+  // them in. The mask is on the map's own grid, so k counts that grid's
+  // voxels; the few most recent masks are kept for the panels sharing them.
+  var keepCache = boundedCache(6);
+
+  function clusterMinimum() {
+    var k = Math.floor(Number(el["cluster-min"].value));
+    return isFinite(k) && k > 1 ? k : 1;
+  }
+
+  function clusterKeepData(map, style, brain, sig, minimum) {
+    var nx = map.dims[0], ny = map.dims[1], nz = map.dims[2], nxy = nx * ny, n = nxy * nz;
+    var values = map.data;
+    // The shader compares in 32-bit floats; so does this.
+    var floor = Math.fround(isFinite(style.floor) ? style.floor : 1e30);
+    var sigFloor = sig ? Math.fround(style.sigFloor) : 0;
+    var sign = new Uint8Array(n);
+    for (var v = 0; v < n; v += 1) {
+      var value = values[v], m = Math.abs(value);
+      if (!(m > 0) || m < floor) continue;
+      if (brain && brain[v] < 128) continue;
+      if (sig && !(sig[v] >= sigFloor)) continue;
+      sign[v] = value >= 0 ? 1 : 2;
+    }
+    var keep = new Uint8Array(n).fill(255);
+    var queue = new Int32Array(n);
+    for (var start = 0; start < n; start += 1) {
+      var want = sign[start];
+      if (!want) continue;
+      // A voxel's sign is cleared once queued, so each is visited once.
+      sign[start] = 0;
+      var head = 0, tail = 0;
+      queue[tail++] = start;
+      while (head < tail) {
+        var c = queue[head++];
+        var i = c % nx, j = Math.floor(c / nx) % ny, k = Math.floor(c / nxy);
+        if (i > 0 && sign[c - 1] === want) { sign[c - 1] = 0; queue[tail++] = c - 1; }
+        if (i < nx - 1 && sign[c + 1] === want) { sign[c + 1] = 0; queue[tail++] = c + 1; }
+        if (j > 0 && sign[c - nx] === want) { sign[c - nx] = 0; queue[tail++] = c - nx; }
+        if (j < ny - 1 && sign[c + nx] === want) { sign[c + nx] = 0; queue[tail++] = c + nx; }
+        if (k > 0 && sign[c - nxy] === want) { sign[c - nxy] = 0; queue[tail++] = c - nxy; }
+        if (k < nz - 1 && sign[c + nxy] === want) { sign[c + nxy] = 0; queue[tail++] = c + nxy; }
+      }
+      if (tail < minimum) for (var q = 0; q < tail; q += 1) keep[queue[q]] = 0;
+    }
+    return keep;
+  }
+
+  // Binds the cluster mask the current style asks for; false when there is none.
+  function bindClusterKeep(layer, gl, style, brain, significance) {
+    var minimum = style.clusterMin || 1;
+    layer.keepData = null;
+    if (minimum <= 1 || !layer.map || style.gray || significance === "waiting") return false;
+    var sig = significance === "ready" ? layer.sigs[style.sigMode] : null;
+    var key = [layer.map.key, style.floor, sig ? sig.key + ":" + style.sigFloor : "",
+               brain ? layer.brainKey : "", minimum].join("|");
+    var data = keepCache.get(key, function () {
+      return clusterKeepData(layer.map, style, brain ? layer.brainData : null, sig ? sig.data : null, minimum);
+    });
+    if (!layer.keepTex || layer.keepShared !== layer.shared) {
+      layer.keepTex = gl.createTexture();
+      layer.keepShared = layer.shared;
+      layer.keepUploaded = null;
+    }
+    if (layer.keepUploaded !== key) {
+      uploadVolume(layer, layer.keepTex, data, layer.map.dims);
+      layer.keepUploaded = key;
+    }
+    layer.keepData = data;
+    return true;
+  }
+
   function setLayerMask(instance, grid, key) {
     var layer = instance && instance.__layer;
     if (!layer) return;
@@ -2364,17 +2515,28 @@
     var u = shared.uniforms;
     gl.useProgram(shared.program);
     gl.bindVertexArray(shared.vao);
-    gl.activeTexture(gl.TEXTURE2);
+    // An upload binds its texture to whichever unit is active, so the brain,
+    // companion and cluster textures are brought up to date on a spare unit
+    // first, then bound to their own. (Uploading on unit 3 once left the
+    // cluster mask where the shader reads p, and the map vanished until the
+    // next redraw.)
+    gl.activeTexture(gl.TEXTURE11);
     var brain = state.hideOutside && brainFor(layer, instance.volumes[0]);
+    var significance = bindSignificance(layer, gl, style);
+    var keep = bindClusterKeep(layer, gl, style, brain, significance);
+    gl.activeTexture(gl.TEXTURE2);
     gl.bindTexture(gl.TEXTURE_3D, brain ? layer.brainTex : null);
     gl.uniform1i(u.uBrain, 2);
     gl.uniform1i(u.uHasBrain, brain ? 1 : 0);
-    var significance = bindSignificance(layer, gl, style);
     gl.activeTexture(gl.TEXTURE3);
     gl.bindTexture(gl.TEXTURE_3D, significance === "ready" ? layer.sigTex : null);
     gl.uniform1i(u.uSig, 3);
     gl.uniform1i(u.uHasSig, significance === "ready" ? 1 : 0);
     gl.uniform1f(u.uSigFloor, significance === "ready" ? style.sigFloor : 0);
+    gl.activeTexture(gl.TEXTURE10);
+    gl.bindTexture(gl.TEXTURE_3D, keep ? layer.keepTex : null);
+    gl.uniform1i(u.uKeep, 10);
+    gl.uniform1i(u.uHasKeep, keep ? 1 : 0);
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_3D, layer.mapTex);
     gl.uniform1i(u.uMap, 0);
@@ -2594,6 +2756,7 @@
         layer.shared.gl.deleteTexture(layer.maskTex);
         if (layer.sigTex) layer.shared.gl.deleteTexture(layer.sigTex);
         if (layer.brainTex) layer.shared.gl.deleteTexture(layer.brainTex);
+        if (layer.keepTex) layer.shared.gl.deleteTexture(layer.keepTex);
         if (layer.srcTex) layer.shared.gl.deleteTexture(layer.srcTex);
         if (layer.dispTex) layer.shared.gl.deleteTexture(layer.dispTex);
         Object.keys(layer.stackTextures || {}).forEach(function (key) {
@@ -3125,6 +3288,12 @@
         linear: linear ? invertAffine(linear) : null, warp: warp
       };
     }
+    // No surfaces of its own (the group): surfaces already in the template's
+    // world if the viewer ships them (surfaces.template_outline, e.g. the
+    // participants' surfaces warped to the template and averaged), else
+    // fsaverage through its approximate volume_transform.
+    var outline = surfaces.template_outline;
+    if (outline) return { key: "template_outline", record: outline, affine: IDENTITY };
     var fsaverage = surfaces.fsaverage;
     if (!fsaverage) return null;
     return { key: "fsaverage|template", record: fsaverage, affine: flatMatrix(fsaverage.volume_transform) };
@@ -3652,6 +3821,9 @@
     var anatomy = isAnatomy(), surface = state.mode === "surface";
     el["threshold-mode-field"].hidden = anatomy;
     el["window-field"].hidden = anatomy;
+    // A surface is clustered through the volume it was sampled from; a
+    // region-level map or a stack on one is not.
+    el["cluster-field"].hidden = anatomy || (surface && !surfaceClusterable());
     el.colorbar.hidden = anatomy;
     var shown = state.endpoint ? styleEntry() : null;
     var stackShown = isStack(shown);
@@ -3664,7 +3836,7 @@
     el["contour-field"].hidden = surface || !contoursPossible();
     // A map on its own underlay (a boldref, a T1 in a boldref's frame) is in
     // neither MNI nor the subject's T1, so the choice between them goes.
-    el["space-field"].hidden = !feature("subjectSpace") || !!(shown && shown.underlay);
+    el["space-field"].hidden = surface || !feature("subjectSpace") || !!(shown && shown.underlay);
     el.mix.value = Math.round(state.mix * 100);
     el["mix-value"].textContent = el.mix.value + "%";
     el.warp.value = Math.round(state.warpFraction * 100);
@@ -3808,9 +3980,21 @@
       applyStyle(nv, currentMap());
       montageViews.forEach(function (view) { applyStyle(view.nv, view.entry); });
     }
-    el["threshold-value"].textContent = picked.label || "±" + format(picked.floor);
+    renderThresholdReadout(picked);
     syncDual();
     drawColorbar(picked.floor, windowMax());
+  }
+
+  // The threshold readout and its tip. The k suffix shows only where the map
+  // on screen is clustered (a surface of a region-level map or a stack is
+  // not); applyMode and finishSurface redraw it.
+  function renderThresholdReadout(picked) {
+    picked = picked || thresholdFor(styleEntry());
+    var clusters = state.mode !== "surface" || surfaceClusterable();
+    var clustered = clusters && clusterMinimum() > 1 ? " · k≥" + clusterMinimum() : "";
+    el["threshold-value"].textContent = (picked.label || "±" + format(picked.floor)) + clustered;
+    if (picked.tip) el["threshold-value"].setAttribute("data-tip", picked.tip);
+    else el["threshold-value"].removeAttribute("data-tip");
   }
 
   // Every cache here holds whole volumes or whole surfaces, so an unbounded
@@ -3883,6 +4067,63 @@
     }
   }
 
+  // ---- tooltips ----------------------------------------------------------------
+  // Anything with data-tip (or a title, which is moved to data-tip on first
+  // hover so the browser's own delayed tooltip never shows) gets the one
+  // tooltip, at once, placed below the element or above it near the bottom,
+  // and kept inside the window.
+  var tipBox = null, tipTarget = null;
+
+  function tipFor(node) {
+    var target = node && node.closest ? node.closest("[data-tip], [title]") : null;
+    if (!target || target === document.body || target === document.documentElement) return null;
+    if (target.hasAttribute("title")) {
+      var text = target.getAttribute("title");
+      target.removeAttribute("title");
+      // An emptied title clears the tip rather than leaving the last one.
+      if (text) target.setAttribute("data-tip", text); else target.removeAttribute("data-tip");
+    }
+    return target.getAttribute("data-tip") ? target : null;
+  }
+
+  function showTip(target) {
+    if (!tipBox) {
+      tipBox = document.createElement("div");
+      tipBox.id = "tip";
+      tipBox.setAttribute("role", "tooltip");
+      document.body.appendChild(tipBox);
+    }
+    tipTarget = target;
+    tipBox.textContent = target.getAttribute("data-tip");
+    tipBox.hidden = false;
+    var box = target.getBoundingClientRect();
+    var width = tipBox.offsetWidth, height = tipBox.offsetHeight;
+    var left = Math.min(Math.max(8, box.left), window.innerWidth - width - 8);
+    var top = box.bottom + 6;
+    if (top + height > window.innerHeight - 8) top = Math.max(8, box.top - height - 6);
+    tipBox.style.left = left + "px";
+    tipBox.style.top = top + "px";
+  }
+
+  function hideTip() {
+    tipTarget = null;
+    if (tipBox) tipBox.hidden = true;
+  }
+
+  function wireTooltips() {
+    document.addEventListener("mouseover", function (event) {
+      var target = tipFor(event.target);
+      if (target) { if (target !== tipTarget) showTip(target); } else if (tipTarget) hideTip();
+    });
+    document.addEventListener("focusin", function (event) {
+      var target = tipFor(event.target);
+      if (target) showTip(target); else hideTip();
+    });
+    document.addEventListener("focusout", hideTip);
+    document.addEventListener("pointerdown", hideTip, true);
+    window.addEventListener("scroll", hideTip, true);
+  }
+
   function prefetchSiblings() {
     if (!state.endpoint) return;
     var wanted = [];
@@ -3891,6 +4132,22 @@
       if (!path || seen[path]) return;
       seen[path] = 1;
       wanted.push(path);
+    }
+    // 0. with several controls, the variants one choice away from this one
+    var controls = variantControls();
+    var here = currentVariant();
+    if (controls && here && here.values) {
+      (state.endpoint.variants || []).forEach(function (variant) {
+        var values = variant.values || {};
+        var differ = Object.keys(Object.assign({}, values, here.values)).filter(function (key) {
+          return values[key] !== here.values[key];
+        });
+        if (differ.length !== 1) return;
+        state.endpoint.maps.forEach(function (entry) {
+          if (entry.variant === variant.id && entry.subject === state.subject &&
+              entry.feature === state.feature) want(entry.path);
+        });
+      });
     }
     // 1. the same subject wherever else it appears, in rail order
     (state.manifest.reports || []).forEach(function (report) {
@@ -4869,7 +5126,9 @@
     "    float level = clamp(magnitude / max(uWindow, 1e-6), 0.0, 1.0);",
     "    float u = vValue >= 0.0 ? 0.5 + level * 0.5 : 0.5 - level * 0.5;",
     "    vec3 hue = texture(uRamp, vec2(u, 0.5)).rgb;",
-    "    float coverage = magnitude >= uThreshold ? 1.0",
+    // Zero (a vertex a p, q or FWE companion masked out, whose threshold is
+    // 0) and NaN are no value, as on the slices: never painted.
+    "    float coverage = !(magnitude > 0.0) ? 0.0 : magnitude >= uThreshold ? 1.0",
     "      : (uFade > 0.5 ? pow(magnitude / max(uThreshold, 1e-6), 2.0) : 0.0);",
     "    base = mix(base, hue, coverage * uMapOpacity);",
     "  }",
@@ -5981,7 +6240,8 @@
     var variant = currentVariant();
     var statistic = (variant && variant.statistic) || stats.statistic;
     // With a p or q threshold set, the labels report the same statistic.
-    if (map && map.significance && map.significance[state.thresholdMode]) statistic = state.thresholdMode;
+    if (map && map.significance && map.significance[state.thresholdMode] &&
+        (state.thresholdMode === "p" || state.thresholdMode === "q")) statistic = state.thresholdMode;
     return {
       atlas: stats.atlas, volumeAtlas: stats.volume_atlas, rows: holder._byName,
       statistic: statistic === "p" ? "p" : "q",
@@ -6451,6 +6711,8 @@
         context.font = index === 0 ? mainFont : smallFont;
         var y = label.top + index * lineHeight;
         context.lineWidth = 3.5 * ratio;
+        // Round joins: the default miter puts spikes on sharp letters (the apexes of M).
+        context.lineJoin = "round";
         context.strokeStyle = "rgba(10,14,20," + (0.9 * label.alpha).toFixed(3) + ")";
         context.strokeText(line, label.x, y);
         context.fillStyle = "rgba(245, 248, 252," + label.alpha.toFixed(3) + ")";
@@ -6647,6 +6909,67 @@
       if (part.membership[name][vertex]) names.push(name);
     });
     return names;
+  }
+
+  // ---- scripted surface control (window.__viewer) ------------------------------
+  function scriptedPart(hemisphere, vertex) {
+    if (state.mode !== "surface") return null;
+    var part = surfaceParts.filter(function (p) { return p.hemisphere === hemisphere; })[0];
+    if (!part || !part.mesh || !part.mesh.pts) return null;
+    var v = Math.floor(Number(vertex));
+    if (!(v >= 0 && v < part.mesh.pts.length / 3)) return null;
+    return { part: part, vertex: v };
+  }
+
+  // Moves the marker and the readout to a vertex, as a click there would.
+  // False while the surface (or that hemisphere) is not up.
+  function scriptedMarkVertex(hemisphere, vertex) {
+    var hit = scriptedPart(hemisphere, vertex);
+    if (!hit) return false;
+    reportPick(hit);
+    return true;
+  }
+
+  // The orbit drag's own steps, so it is cheap enough to call every frame.
+  // Azimuth wraps; elevation is held inside +-89 degrees as the drag holds it.
+  function scriptedSetCamera(azimuth, elevation, zoom) {
+    if (!isFinite(azimuth) || !isFinite(elevation)) return false;
+    state.azimuth = ((Number(azimuth) % 360) + 360) % 360;
+    state.elevation = Math.max(-89, Math.min(89, Number(elevation)));
+    if (isFinite(zoom) && zoom > 0) state.surfaceZoom = Number(zoom);
+    cameraHeld = { azimuth: state.azimuth, elevation: state.elevation };
+    viewDraw();
+    return true;
+  }
+
+  // The [azimuth, elevation] that turns the camera to look straight at a
+  // vertex of the geometry on screen, along the vertex's direction from its
+  // hemisphere's centroid (from = "hemisphere", the default) or from the
+  // centre of the scene the view is centred on (from = "scene", which also
+  // puts the vertex at the middle of the frame). The view rotation is
+  // Rx(elevation - 90) Rz(-azimuth) with the camera on +z, so the direction it
+  // faces is (sin a cos e, -cos a cos e, sin e).
+  function scriptedVertexDirection(hemisphere, vertex, from) {
+    var hit = scriptedPart(hemisphere, vertex);
+    if (!hit) return null;
+    var pts = hit.part.mesh.pts, v = hit.vertex, centre = [0, 0, 0];
+    if (from === "scene") {
+      var bounds = sceneBounds();
+      if (!bounds) return null;
+      centre = [0, 1, 2].map(function (a) { return (bounds.lo[a] + bounds.hi[a]) / 2; });
+    } else {
+      var n = pts.length / 3;
+      for (var i = 0; i < n; i += 1) {
+        centre[0] += pts[i * 3]; centre[1] += pts[i * 3 + 1]; centre[2] += pts[i * 3 + 2];
+      }
+      centre = centre.map(function (c) { return c / n; });
+    }
+    var d = [pts[v * 3] - centre[0], pts[v * 3 + 1] - centre[1], pts[v * 3 + 2] - centre[2]];
+    var length = Math.sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+    if (!(length > 0)) return null;
+    var elevation = Math.asin(Math.max(-1, Math.min(1, d[2] / length))) * 180 / Math.PI;
+    var azimuth = Math.atan2(d[0], -d[1]) * 180 / Math.PI;
+    return [((azimuth % 360) + 360) % 360, elevation];
   }
 
   function reportPick(hit) {
@@ -6952,7 +7275,7 @@
   function surfaceSignificance(entry) {
     var source = entry && entry.significance;
     if (!source) return Promise.resolve(null);
-    var modes = ["p", "q"].filter(function (m) { return !!source[m]; });
+    var modes = ["p", "q", "fwe"].filter(function (m) { return !!source[m]; });
     return Promise.all(modes.map(function (m) {
       return loadImage(source[m]).catch(function () { return null; });
     })).then(function (images) {
@@ -6965,6 +7288,26 @@
   // -log10 p (and q) per vertex. A region-level map takes them from its rows
   // through the parcellation, as its colours are; any other samples the
   // companion volumes at the same white-surface points as the map.
+  // One sample per vertex at its registration-fusion point.
+  function sampleAtPoints(sample, points, count) {
+    var values = new Float32Array(count);
+    for (var v = 0; v < count; v += 1) {
+      var value = sample(points[v * 3], points[v * 3 + 1], points[v * 3 + 2]);
+      values[v] = value && isFinite(value) ? value : 0;
+    }
+    return values;
+  }
+
+  // The hemisphere's points for this template, when they fit its mesh.
+  function hemispherePoints(info, space, count) {
+    var path = space && info && info.volume_points && info.volume_points[space];
+    if (!path) return Promise.resolve(null);
+    return fetchBinary(path).then(function (buffer) {
+      var points = new Float32Array(buffer);
+      return points.length === count * 3 ? points : null;
+    }).catch(function () { return null; });
+  }
+
   function sampleSignificance(part, record, images, transform) {
     if (!images) return null;
     var count = part.values.length;
@@ -6986,6 +7329,10 @@
       return out;
     }
     Object.keys(images).forEach(function (mode) {
+      if (part.volumePoints) {
+        out[mode] = sampleAtPoints(volumeSampler(images[mode]), part.volumePoints, count);
+        return;
+      }
       var sample = transformedSampler(volumeSampler(images[mode]), transform);
       var values = new Float32Array(count);
       for (var v = 0; v < count; v += 1) {
@@ -6999,17 +7346,26 @@
   // Applies the p or q mask to the surface values; returns whether any changed.
   function maskSurfaceValues(picked) {
     var changed = false;
+    var minimum = clusterMinimum();
     surfaceParts.forEach(function (part) {
       if (!part.rawValues) return;
-      var key = picked && picked.sigMode && part.sig && part.sig[picked.sigMode]
+      var sigKey = picked && picked.sigMode && part.sig && part.sig[picked.sigMode]
         ? picked.sigMode + ":" + picked.sigFloor : "raw";
+      var clustered = picked && minimum > 1 && part.cluster;
+      var key = sigKey + (clustered ? "|k" + minimum + ":" + picked.floor : "");
       if (part.maskKey === key) return;
       part.maskKey = key;
       changed = true;
-      if (key === "raw") { part.values.set(part.rawValues); return; }
-      var sig = part.sig[picked.sigMode];
-      for (var v = 0; v < part.values.length; v += 1) {
-        part.values[v] = sig[v] >= picked.sigFloor ? part.rawValues[v] : 0;
+      if (sigKey === "raw") part.values.set(part.rawValues);
+      else {
+        var sig = part.sig[picked.sigMode];
+        for (var v = 0; v < part.values.length; v += 1) {
+          part.values[v] = sig[v] >= picked.sigFloor ? part.rawValues[v] : 0;
+        }
+      }
+      var keep = clustered ? surfaceKeep(part, picked, minimum) : null;
+      if (keep && keep.length === part.values.length) {
+        for (var w = 0; w < keep.length; w += 1) if (!keep[w]) part.values[w] = 0;
       }
     });
     return changed;
@@ -7126,6 +7482,13 @@
         var at = toMap(x, y, z);
         return at ? direct(at[0], at[1], at[2]) : 0;
       } : function () { return 0; };
+      // Cluster ≥ needs the map's grid; a region-level map or a stack has none.
+      var nativeMap = toMap && !regionStats() && !isStack(entry) ? clusterMap(image, "surface|" + entry.path) : null;
+      var directIndex = nativeMap ? voxelIndexer(image) : null;
+      var sampleIndex = nativeMap ? function (x, y, z) {
+        var at = toMap(x, y, z);
+        return at ? directIndex(at[0], at[1], at[2]) : -1;
+      } : null;
       var faces = results[1];
       return Promise.all(wanted.map(function (hemisphere, index) {
         var info = record.hemispheres[hemisphere];
@@ -7141,6 +7504,8 @@
         jobs.push(flat.face_mask ? fetchBinary(flat.face_mask) : Promise.resolve(null));
         jobs.push(info.curvature ? fetchBinary(info.curvature) : Promise.resolve(null));
         jobs.push(info.sulc ? fetchBinary(info.sulc) : Promise.resolve(null));
+        var pointsPath = route.points && info.volume_points ? info.volume_points[route.points] : null;
+        jobs.push(pointsPath ? fetchBinary(pointsPath).catch(function () { return null; }) : Promise.resolve(null));
         return Promise.all(jobs).then(function (buffers) {
           if (token !== loadToken) return;
           var geometries = {};
@@ -7166,11 +7531,24 @@
           prepareFlat(part);
           // Values are sampled once, averaged over the cortex's depth, and ride
           // along with the vertices through every morph.
-          var values = new Float32Array(count);
-          for (var v = 0; v < count; v += 1) {
-            values[v] = depthAverage(sample, geometries.wm, geometries.pia, v);
+          var pointsBuffer = buffers[names.length + 3];
+          var points = pointsBuffer ? new Float32Array(pointsBuffer) : null;
+          if (points && points.length !== count * 3) points = null;
+          part.volumePoints = points;
+          var values;
+          if (points) {
+            values = sampleAtPoints(direct, points, count);
+          } else {
+            values = new Float32Array(count);
+            for (var v = 0; v < count; v += 1) {
+              values[v] = depthAverage(sample, geometries.wm, geometries.pia, v);
+            }
           }
           part.values = values;
+          part.clusterNative = !nativeMap ? null
+            : points ? clusterRoute(directIndex, nativeMap, points, null, count)
+            : clusterRoute(sampleIndex, nativeMap, geometries.wm, geometries.pia, count);
+          part.cluster = part.clusterNative;
           return Promise.all([loadParcels(record, hemisphere), surfaceSignificance(entry)])
             .then(function (loaded) {
               if (token !== loadToken) return;
@@ -7181,6 +7559,7 @@
               part.foldNative = part.curvature;
               part.sig = route.plain ? sampleSignificance(part, record, loaded[1], transform) : null;
               part.sigNative = part.sig;
+              if (part.sig) clusterSigs(part.clusterNative, loaded[1], "surface|" + entry.path);
               parts.push(part);
             });
         });
@@ -7202,8 +7581,11 @@
   }
 
   function finishSurface(record, showing) {
+    applyPendingWindow();
     applyTemplateMix();
     maskSurfaceValues(thresholdFor(styleEntry()));
+    syncAnatomyControls();
+    renderThresholdReadout();
     viewBuild();
     anim.morph = state.morph;
     anim.split = state.split;
@@ -7362,23 +7744,46 @@
     }
     if (isStack(entry)) return sampleStackSurface(entry, true, fsaverage);
     var route = surfaceRoute(entry, true, fsaverage);
-    return Promise.all([loadImage(entry.path), route.ready, surfaceSignificance(entry)]).then(function (loaded) {
+    var pointJobs = surfaceParts.map(function (part) {
+      var raw = part.templateRaw && part.templateRaw.wm;
+      return route.points && raw
+        ? hemispherePoints(fsaverage.hemispheres[part.hemisphere], route.points, raw.length / 3)
+        : Promise.resolve(null);
+    });
+    return Promise.all([loadImage(entry.path), route.ready, surfaceSignificance(entry),
+                        Promise.all(pointJobs)]).then(function (loaded) {
       var direct = volumeSampler(loaded[0]), toMap = loaded[1];
-      surfaceParts.forEach(function (part) {
+      var templateMap = toMap ? clusterMap(loaded[0], "surface-template|" + entry.path) : null;
+      var templateIndex = templateMap ? voxelIndexer(loaded[0]) : null;
+      surfaceParts.forEach(function (part, partIndex) {
         var raw = part.templateRaw && part.templateRaw.wm;
         if (!raw || !toMap) return;
+        var points = loaded[3][partIndex];
         var routed = function (x, y, z) {
           var at = toMap(x, y, z);
           return at ? direct(at[0], at[1], at[2]) : 0;
         };
-        var values = new Float32Array(raw.length / 3);
-        for (var v = 0; v < values.length; v += 1) {
-          values[v] = depthAverage(routed, raw, part.templateRaw.pia, v);
+        var values;
+        if (points) {
+          values = sampleAtPoints(direct, points, raw.length / 3);
+        } else {
+          values = new Float32Array(raw.length / 3);
+          for (var v = 0; v < values.length; v += 1) {
+            values[v] = depthAverage(routed, raw, part.templateRaw.pia, v);
+          }
         }
         part.valuesTemplate = values;
+        part.clusterTemplate = !templateMap ? null
+          : points ? clusterRoute(templateIndex, templateMap, points, null, values.length)
+          : clusterRoute(function (x, y, z) {
+            var at = toMap(x, y, z);
+            return at ? templateIndex(at[0], at[1], at[2]) : -1;
+          }, templateMap, raw, part.templateRaw.pia, values.length);
         if (route.plain && loaded[2]) {
-          var probe = { values: values, geometries: { wm: raw, pia: part.templateRaw.pia }, parcels: part.parcels };
+          var probe = { values: values, geometries: { wm: raw, pia: part.templateRaw.pia }, parcels: part.parcels,
+                        volumePoints: points };
           part.sigTemplate = sampleSignificance(probe, fsaverage, loaded[2], fsaverage.volume_transform);
+          if (part.sigTemplate) clusterSigs(part.clusterTemplate, loaded[2], "surface-template|" + entry.path);
         } else {
           part.sigTemplate = null;
         }
@@ -7391,6 +7796,95 @@
   // the map, or on its empty outside, adds nothing). The white surface alone
   // sits on the grey-white boundary and reads white matter as much as cortex.
   var DEPTHS = [0, 0.25, 0.5, 0.75, 1];
+
+  // ---- Cluster ≥ on a surface ----------------------------------------------------
+  // Clusters are found on the volume, as on the slices, and carried to the
+  // surface through the depth points its values were averaged over. Each
+  // route (the subject's own surface, or fsaverage's while morphing) keeps the
+  // voxel every depth point landed on, so a threshold change only re-reads
+  // the mask. A vertex is dropped when one of its points is in a voxel the
+  // cluster rule removed and none is in a voxel that survived; a vertex none
+  // of whose points passes the threshold cannot pass it on the surface
+  // either, since its value is an average of theirs.
+  function voxelIndexer(image) {
+    var grid = gridOf(image), d = grid.dims, inv = grid.inv, o = grid.origin;
+    if (!inv) return function () { return -1; };
+    return function (x, y, z) {
+      var dx = x - o[0], dy = y - o[1], dz = z - o[2];
+      var i = Math.round(inv[0][0] * dx + inv[0][1] * dy + inv[0][2] * dz);
+      var j = Math.round(inv[1][0] * dx + inv[1][1] * dy + inv[1][2] * dz);
+      var k = Math.round(inv[2][0] * dx + inv[2][1] * dy + inv[2][2] * dz);
+      if (i < 0 || j < 0 || k < 0 || i >= d[0] || j >= d[1] || k >= d[2]) return -1;
+      return i + d[0] * (j + d[1] * k);
+    };
+  }
+
+  function clusterRoute(index, map, wm, pia, count) {
+    var n = pia ? DEPTHS.length : 1;
+    var indices = new Int32Array(count * n);
+    for (var v = 0; v < count; v += 1) {
+      for (var d = 0; d < n; d += 1) {
+        var t = pia ? DEPTHS[d] : 0;
+        indices[v * n + d] = index(
+          wm[v * 3] + (pia ? (pia[v * 3] - wm[v * 3]) * t : 0),
+          wm[v * 3 + 1] + (pia ? (pia[v * 3 + 1] - wm[v * 3 + 1]) * t : 0),
+          wm[v * 3 + 2] + (pia ? (pia[v * 3 + 2] - wm[v * 3 + 2]) * t : 0));
+      }
+    }
+    return { map: map, indices: indices, depths: n, sigs: {} };
+  }
+
+  // The map's own grid data, for clustering; null when it cannot be clustered.
+  function clusterMap(image, key) {
+    var grid = gridOf(image);
+    if (!grid.inv) return null;
+    return { key: key, dims: grid.dims, data: rasData(image, key) };
+  }
+
+  // Companion volumes on the map's grid, for the p, q and FWE rules.
+  function clusterSigs(route, images, mapKey) {
+    if (!route || !images) return;
+    Object.keys(images).forEach(function (mode) {
+      var grid = gridOf(images[mode]);
+      if (grid.dims.join() !== route.map.dims.join()) return;
+      var key = mapKey + "|sig-" + mode;
+      route.sigs[mode] = { key: key, data: rasData(images[mode], key) };
+    });
+  }
+
+  // Per vertex: 1 kept, 0 dropped by the cluster rule. Null when the part has
+  // no route to cluster through.
+  function surfaceKeep(part, picked, minimum) {
+    var route = part.cluster;
+    if (!route || minimum <= 1) return null;
+    var sig = picked.sigMode ? route.sigs[picked.sigMode] || null : null;
+    var map = route.map, data = map.data;
+    var key = [map.key, picked.floor, sig ? sig.key + ":" + picked.sigFloor : "", "", minimum].join("|");
+    var keep = keepCache.get(key, function () {
+      return clusterKeepData(map, { floor: picked.floor, sigFloor: picked.sigFloor }, null, sig ? sig.data : null, minimum);
+    });
+    var floor = Math.fround(isFinite(picked.floor) ? picked.floor : 1e30);
+    var sigFloor = sig ? Math.fround(picked.sigFloor) : 0;
+    var n = route.depths, indices = route.indices, count = indices.length / n;
+    var out = new Uint8Array(count);
+    for (var v = 0; v < count; v += 1) {
+      var killed = false, survived = false;
+      for (var d = 0; d < n; d += 1) {
+        var at = indices[v * n + d];
+        if (at < 0) continue;
+        if (keep[at] === 0) { killed = true; continue; }
+        var m = Math.abs(data[at]);
+        if (m > 0 && m >= floor && (!sig || sig.data[at] >= sigFloor)) survived = true;
+      }
+      out[v] = killed && !survived ? 0 : 1;
+    }
+    return out;
+  }
+
+  function surfaceClusterable() {
+    return surfaceParts.some(function (part) { return !!part.cluster; });
+  }
+
   function depthAverage(sample, wm, pia, v) {
     if (!pia) return sample(wm[v * 3], wm[v * 3 + 1], wm[v * 3 + 2]) || 0;
     var sum = 0, n = 0;
@@ -7523,6 +8017,7 @@
         }
       }
       part.sig = beta >= 0.5 && part.sigTemplate !== undefined ? part.sigTemplate : part.sigNative;
+      part.cluster = beta >= 0.5 && part.clusterTemplate !== undefined ? part.clusterTemplate : part.clusterNative;
       part.maskKey = null;
       var own = foldingOf(part);
       var fold = part.templateFold;
@@ -7640,6 +8135,28 @@
   // How a vertex of the surface on screen finds its place in that map.
   // Returns { ready: promise of (x, y, z) -> map mm or null, plain: whether
   // it is the direct route (fsaverage's affine, or none) }.
+  // The template a template-space map is in: the endpoint's, else the viewer's.
+  function mapTemplateSpace() {
+    return (state.endpoint && state.endpoint.template_space) || state.manifest.template_space || "";
+  }
+
+  // Registration fusion (Wu et al. 2018): an fsaverage export can carry, per
+  // hemisphere and template, one template coordinate per vertex -- where that
+  // vertex's mid-thickness lands in the template, averaged over subjects'
+  // own registrations. A template map in that template is read once there,
+  // with no MNI305 affine and no averaging over fsaverage's depth, whose
+  // white and pial surfaces are not anyone's anatomy. Other maps take the
+  // affine.
+  function pointsSpace(record) {
+    var space = mapTemplateSpace();
+    if (!space || !record || !record.hemispheres) return null;
+    var any = ["lh", "rh"].some(function (h) {
+      var info = record.hemispheres[h];
+      return info && info.volume_points && info.volume_points[space];
+    });
+    return any ? space : null;
+  }
+
   function surfaceRoute(entry, fsaverage, record) {
     var coords = ((state.manifest.subject_space || {}).coords || {})[entry.subject] || {};
     var affine = flatMatrix(entry.surface_affine);
@@ -7652,7 +8169,8 @@
               m[8] * x + m[9] * y + m[10] * z + m[11]];
     }
     if (fsaverage && !subjectFrame) {
-      return { plain: true, ready: Promise.resolve(function (x, y, z) { return apply(volume, x, y, z); }) };
+      return { plain: true, points: pointsSpace(record),
+               ready: Promise.resolve(function (x, y, z) { return apply(volume, x, y, z); }) };
     }
     if (!fsaverage && subjectFrame) {
       return { plain: !affine, ready: Promise.resolve(function (x, y, z) { return apply(affine, x, y, z); }) };
@@ -7883,6 +8401,7 @@
     setPressed(el.modes, "data-mode-kind", state.mode);
     applyDisplayRows();
     renderRegionList();
+    renderThresholdReadout();
     if (surface) {
       teardownPanels();
       buildSurface();
@@ -8116,7 +8635,7 @@
       });
     })).then(function () {
       if (token !== loadToken) return;
-      refreshStyle();
+      if (!applyPendingWindow()) refreshStyle();
       refreshRegions();
       updatePanelStatuses();
       el.loading.hidden = true;
@@ -8227,7 +8746,7 @@
       });
       if (state.space === "subject" && manySubjects) linkThroughMNI();
       else linkDirect();
-      refreshStyle();
+      if (!applyPendingWindow()) refreshStyle();
       refreshRegions();
       if (state.view === "montage") applyMontageSlice();
       updatePanelStatuses();
@@ -8252,20 +8771,34 @@
     updatePanelStatuses();
   }
 
+  // With cohorts, an endpoint may have no maps in the one chosen; it and a
+  // report left with none are not listed.
+  function firstNonEmptyEndpoint() {
+    for (var r = 0; r < state.manifest.reports.length; r += 1) {
+      var open = state.manifest.reports[r].endpoints.filter(function (e) { return e.maps.length; })[0];
+      if (open) return open;
+    }
+    return null;
+  }
+
   function renderRail() {
+    renderCohorts();
     el.reports.textContent = "";
     state.manifest.reports.forEach(function (report) {
+      var listed = report.endpoints.filter(function (e) { return e.maps.length; }).length;
+      if (!listed) return;
       var node = document.createElement("button");
       node.type = "button"; node.className = "item";
       node.setAttribute("aria-pressed", report === state.report ? "true" : "false");
       node.innerHTML = "<span></span><span class='sub'></span>";
       node.children[0].textContent = report.label;
-      node.children[1].textContent = report.endpoints.length + " endpoints";
+      node.children[1].textContent = listed + " endpoints";
       node.addEventListener("click", function () { selectReport(report); });
       el.reports.appendChild(node);
     });
     el.endpoints.textContent = "";
     state.report.endpoints.forEach(function (endpoint) {
+      if (!endpoint.maps.length) return;
       var node = document.createElement("button");
       node.type = "button"; node.className = "item";
       node.setAttribute("aria-pressed", endpoint === state.endpoint ? "true" : "false");
@@ -8309,11 +8842,11 @@
         }
         syncEndpointRegions(state.endpoint);
         renderRail(); renderBar(); renderRegionList();
-        if (!sameWindow(before, currentRange())) resetWindow(); else refreshStyle();
-        reloadView();
+        reloadAfterChange(before);
       };
       var group = document.createElement("div");
       group.className = "control";
+      group.setAttribute("data-control", control.id);
       if (control.kind === "toggle") {
         var row = document.createElement("label");
         row.className = "switch";
@@ -8353,10 +8886,11 @@
         (control.options || []).forEach(function (option) {
           var node = document.createElement("button");
           node.type = "button"; node.textContent = option.label;
-          if (option.tip) node.title = option.tip;
+          node.setAttribute("data-option", option.id);
+          if (option.tip) node.setAttribute("data-tip", option.tip);
           node.setAttribute("aria-pressed", values[control.id] === option.id ? "true" : "false");
           node.disabled = options.indexOf(option.id) === -1;
-          if (node.disabled && option.unavailable) node.title = option.unavailable;
+          if (node.disabled && option.unavailable) node.setAttribute("data-tip", option.unavailable);
           node.addEventListener("click", function () { pick(option.id); });
           seg.appendChild(node);
         });
@@ -8377,20 +8911,20 @@
       features.forEach(function (feature) {
         var node = document.createElement("button");
         node.type = "button"; node.textContent = feature.label;
+        node.setAttribute("data-feature", feature.id);
         node.setAttribute("aria-pressed", feature.id === state.feature ? "true" : "false");
         // Greyed rather than hidden, so the choices keep their places when a
         // subject without this feature (a group test of 3D - 2D alone) is up.
         node.disabled = variantControls()
           ? !subjectMaps().some(function (m) { return m.feature === feature.id; })
           : !hasFeatureMap(feature.id);
-        if (node.disabled) node.title = state.subject + " has no map for this";
+        if (node.disabled) node.setAttribute("data-tip", state.subject + " has no map for this");
         node.addEventListener("click", function () {
           var before = currentRange();
           state.feature = feature.id;
           if (variantControls()) { resolveVariant(); renderRail(); }
           renderBar();
-          if (variantControls() && !sameWindow(before, currentRange())) resetWindow();
-          reloadView();
+          if (variantControls()) reloadAfterChange(before); else reloadView();
         });
         el.features.appendChild(node);
       });
@@ -8411,8 +8945,7 @@
       var before = currentRange();
       state.variant = id;
       renderRail(); renderBar();
-      if (!sameWindow(before, currentRange())) resetWindow();
-      reloadView();
+      reloadAfterChange(before);
     }
     if (!control) {
       // drawn by renderVariantControls
@@ -8445,6 +8978,7 @@
       variants.forEach(function (variant) {
         var node = document.createElement("button");
         node.type = "button"; node.textContent = variant.label;
+        node.setAttribute("data-variant", variant.id);
         node.setAttribute("aria-pressed", currentVariant() === variant ? "true" : "false");
         node.addEventListener("click", function () { chooseVariant(variant.id); });
         el.variants.appendChild(node);
@@ -8455,6 +8989,11 @@
       var node = document.createElement("button");
       node.type = "button"; node.textContent = subject;
       node.setAttribute("aria-pressed", subject === state.subject ? "true" : "false");
+      var reason = excludedReason(subject);
+      if (reason) {
+        node.className = "excluded";
+        node.title = "Left out of the group results: " + reason;
+      }
       node.addEventListener("click", function () { chooseSubject(subject); });
       el.subjects.appendChild(node);
     });
@@ -8466,14 +9005,27 @@
     var curvesNow = state.endpoint.statistic === "t" && !!(shown && shown.thresholds);
     var sigNow = (shown && shown.significance) || {};
     var supports = function (mode) {
+      if (mode === "fwe") return !!sigNow.fwe;
       return mode === "value" || curvesNow || !!sigNow[mode];
     };
     // Kept in place and greyed out rather than hidden, so the bar does not
-    // rearrange itself every time the endpoint changes.
+    // rearrange itself every time the endpoint changes. FWE is the exception:
+    // only maps with a family-wise companion have it, and it is shown for them.
     Array.prototype.forEach.call(el["threshold-modes"].children, function (node) {
-      node.disabled = !supports(node.getAttribute("data-mode"));
-      node.title = node.disabled ? "this map has no " + node.getAttribute("data-mode") +
-        " values to threshold by" : (sigNow.tip || "");
+      if (node.getAttribute("data-mode") === "fwe") node.hidden = !sigNow.fwe;
+      var mode = node.getAttribute("data-mode");
+      node.disabled = !supports(mode);
+      // Set as data-tip, not title: the tooltip code moves a title into
+      // data-tip on first hover, and a later empty title left the old one.
+      var test = sigNow.label ? sigNow.label + " " : "";
+      var tip = node.disabled ? "this map has no " + (mode === "fwe" ? "FWE" : mode) + " values to threshold by"
+        : sigNow.tip ? sigNow.tip
+        : mode === "p" ? (sigNow.p ? "each voxel's " + test + "p" : "the t map's analytic two-sided p")
+        : mode === "q" ? (sigNow.q ? "each voxel's " + test + "q (FDR)" : "Benjamini-Hochberg FDR over the analytic p")
+        : mode === "fwe" ? "each voxel's " + test + "family-wise corrected p"
+        : "";
+      node.removeAttribute("title");
+      if (tip) node.setAttribute("data-tip", tip); else node.removeAttribute("data-tip");
     });
     // A mode the reader chose comes back when a map that supports it does.
     if (!supports(state.thresholdMode)) {
@@ -8530,7 +9082,10 @@
     // voxelwise p, which is not corrected, at 0.001.
     var shown = state.endpoint ? styleEntry() : null;
     var corrected = !!(shown && shown.significance);
-    var defaults = { value: null, p: corrected ? 0.05 : 0.001, q: 0.05 };
+    var defaults = { value: null, p: corrected ? 0.05 : 0.001, q: 0.05, fwe: 0.05 };
+    // A companion can say where its modes open (an uncorrected permutation p).
+    var own = (shown && shown.significance && shown.significance.defaults) || {};
+    Object.keys(own).forEach(function (key) { defaults[key] = own[key]; });
     if (value !== undefined && value !== null) defaults[mode] = value;
     el["threshold-input"].value = defaults[mode] !== null
       ? defaults[mode] : Number((windowMax() * 0.2).toPrecision(3));
@@ -8552,6 +9107,26 @@
     if (!sameWindow(before, currentRange())) resetWindow();
   }
 
+  // A switch to maps on another scale (the Δr toggle, a cohort, a variant)
+  // used to reset the window at once, so the old map was redrawn at the new
+  // scale while the new one loaded -- a flash of a mis-scaled map between two
+  // correct ones. Now the window is reset where the new map is put up, and the
+  // old map keeps its own window until then.
+  var pendingWindowReset = false;
+
+  function reloadAfterChange(before) {
+    if (before && !sameWindow(before, currentRange())) pendingWindowReset = true;
+    else refreshStyle();
+    reloadView();
+  }
+
+  function applyPendingWindow() {
+    if (!pendingWindowReset) return false;
+    pendingWindowReset = false;
+    resetWindow();
+    return true;
+  }
+
   function resetWindow() {
     var high = currentRange()[1];
     el["window-max"].value = Number(high.toPrecision(3));
@@ -8570,7 +9145,7 @@
 
   function selectReport(report) {
     state.report = report;
-    selectEndpoint(report.endpoints[0]);
+    selectEndpoint(report.endpoints.filter(function (e) { return e.maps.length; })[0] || report.endpoints[0]);
   }
 
   // Comparing two endpoints means comparing them at one window, so a switch
@@ -8595,10 +9170,14 @@
     var previousToggle = toggleOf(state.endpoint);
     var previousOn = previousToggle ? state.variant === previousToggle.on : null;
     var previousControls = variantControls(state.endpoint);
+    var previousFeature = state.feature;
     state.endpoint = endpoint;
     var featureIds = endpoint.features.map(function (f) { return f.id; });
-    state.feature = pendingFeature !== null && featureIds.indexOf(pendingFeature) >= 0
-      ? pendingFeature : (featureIds.length ? featureIds[0] : "");
+    // A link's feature wins; else the one on screen, if this endpoint has it
+    // (2D on one event endpoint stays 2D on the next); else the first.
+    state.feature = pendingFeature !== null && featureIds.indexOf(pendingFeature) >= 0 ? pendingFeature
+      : featureIds.indexOf(previousFeature) >= 0 ? previousFeature
+      : (featureIds.length ? featureIds[0] : "");
     pendingFeature = null;
     var variantIds = (endpoint.variants || []).map(function (v) { return v.id; });
     state.variant = pendingVariant !== null && variantIds.indexOf(pendingVariant) >= 0
@@ -8669,7 +9248,7 @@
       // NiiVue holds only the anatomy; the map goes to the overlay layer.
       setLayerMap(nv, images[1], entry.path, entry);
       try { nv.setInterpolation(true); } catch (ignored) {}
-      refreshStyle();
+      if (!applyPendingWindow()) refreshStyle();
       refreshRegions();
       endQuietLoading();
       el.loading.hidden = true;
@@ -8958,6 +9537,7 @@
   }
 
   function wire() {
+    wireTooltips();
     el["threshold-input"].addEventListener("input", function () {
       retuneStep(el["threshold-input"]);
       refreshStyle();
@@ -8967,6 +9547,7 @@
       refreshStyle();
     });
     el["window-reset"].addEventListener("click", resetWindow);
+    el["cluster-min"].addEventListener("input", refreshStyle);
     el.opacity.addEventListener("input", refreshStyle);
     el["montage-slice"].addEventListener("input", applyMontageSlice);
     el["montage-prev"].addEventListener("click", function () { stepMontagePage(-1); });
@@ -9014,6 +9595,98 @@
   // does the feature set: a project with no surfaces never sees the surface
   // toggle, one with no atlas never sees the region panel. Data alone decides
   // it unless the manifest asks for something to be off.
+  // ---- cohorts --------------------------------------------------------------------
+  // A viewer may list several participant sets (manifest.cohorts; the first is
+  // the default). Every endpoint's maps, and the subject-space maps, are
+  // resolved to the chosen one: each subject/feature/variant shows the chosen
+  // cohort's map if it has one, else the default cohort's. Everything that
+  // reads endpoint.maps -- the map on screen, which variants and features are
+  // offered, montages -- therefore follows the choice with no change of its own.
+  function cohorts() { return (state.manifest && state.manifest.cohorts) || []; }
+  function defaultCohort() { return cohorts().length ? cohorts()[0].id : ""; }
+
+  // A map with a cohort shows only while that cohort is chosen; a map with
+  // none is shared, and gives way to the chosen cohort's own map for the same
+  // key. A result that exists only for some cohorts is not shown for others.
+  function resolveCohort(maps, keyOf) {
+    var chosen = state.cohort || defaultCohort();
+    var picked = {}, order = [];
+    maps.forEach(function (m) {
+      if (m.cohort && m.cohort !== chosen) return;
+      var key = keyOf(m);
+      var current = picked[key];
+      if (current === undefined) { picked[key] = m; order.push(key); return; }
+      if (m.cohort && !current.cohort) picked[key] = m;
+    });
+    return order.map(function (key) { return picked[key]; });
+  }
+
+  function applyCohort() {
+    if (!cohorts().length) return;
+    state.manifest.reports.forEach(function (report) {
+      report.endpoints.forEach(function (endpoint) {
+        if (!endpoint.__allMaps) endpoint.__allMaps = endpoint.maps;
+        endpoint.maps = resolveCohort(endpoint.__allMaps, function (m) {
+          return m.subject + "|" + (m.feature || "") + "|" + (m.variant || "");
+        });
+        // Subjects with no map in this cohort are not listed.
+        if (!endpoint.__allSubjects) endpoint.__allSubjects = endpoint.subjects;
+        var has = {};
+        endpoint.maps.forEach(function (m) { has[m.subject] = true; });
+        endpoint.subjects = endpoint.__allSubjects.filter(function (subject) { return has[subject]; });
+      });
+    });
+    var space = state.manifest.subject_space;
+    if (space && space.maps) {
+      if (!space.__allMaps) space.__allMaps = space.maps;
+      space.maps = resolveCohort(space.__allMaps, function (m) {
+        return m.report + "|" + m.endpoint + "|" + m.subject + "|" + (m.feature || "") + "|" + (m.variant || "");
+      });
+    }
+  }
+
+  function excludedReason(subject) {
+    return ((state.manifest && state.manifest.excluded_subjects) || {})[subject] || "";
+  }
+
+  function renderCohorts() {
+    var list = cohorts();
+    el["cohort-field"].hidden = list.length < 2;
+    if (list.length < 2) return;
+    el.cohorts.textContent = "";
+    var chosen = state.cohort || defaultCohort();
+    list.forEach(function (cohort) {
+      var node = document.createElement("button");
+      node.type = "button"; node.textContent = cohort.label;
+      if (cohort.blurb) node.title = cohort.blurb;
+      node.setAttribute("aria-pressed", cohort.id === chosen ? "true" : "false");
+      node.addEventListener("click", function () { chooseCohort(cohort.id); });
+      el.cohorts.appendChild(node);
+    });
+    var current = list.filter(function (c) { return c.id === chosen; })[0];
+    var excluded = Object.keys((state.manifest.excluded_subjects) || {});
+    el["cohort-note"].textContent = (current && current.blurb ? current.blurb + " " : "") +
+      (excluded.length ? "Italic participants (" + excluded.join(", ") + ") are left out of the group results." : "");
+  }
+
+  function chooseCohort(id) {
+    if ((state.cohort || defaultCohort()) === id) return;
+    var before = state.endpoint ? currentRange() : null;
+    state.cohort = id;
+    applyCohort();
+    // An endpoint, or a subject, with nothing in this cohort gives way to the
+    // first that has something.
+    if (!state.endpoint.maps.length) {
+      var open = state.report.endpoints.filter(function (e) { return e.maps.length; })[0] ||
+        firstNonEmptyEndpoint();
+      if (open) { selectEndpoint(open); return; }
+    }
+    if (state.endpoint.subjects.indexOf(state.subject) < 0) state.subject = state.endpoint.subjects[0];
+    ensureFeature();
+    renderRail(); renderBar();
+    reloadAfterChange(before);
+  }
+
   function describe(manifest) {
     var about = manifest.about || {};
     document.title = about.title || "Result Browser";
@@ -9112,7 +9785,7 @@
   }
 
   function applyFeatures() {
-    el["space-field"].hidden = !feature("subjectSpace");
+    el["space-field"].hidden = state.mode === "surface" || !feature("subjectSpace");
     var regions = el["roi-list"].closest(".group");
     if (regions) regions.hidden = !feature("regions");
     el["display-regions"].hidden = !feature("regions") && !feature("surface");
@@ -9237,6 +9910,7 @@
     var variants = state.endpoint.variants || [];
     if (variants.length && state.variant && variants[0].id !== state.variant) put("vr", state.variant);
     if (state.subject !== state.endpoint.subjects[0]) put("s", state.subject);
+    if (state.cohort && state.cohort !== defaultCohort()) put("co", state.cohort);
     if (state.mode === "surface") put("m", "s");
     if (state.thresholdMode !== "value") put("tm", state.thresholdMode);
     var opened = defaultWindow(state.endpoint);
@@ -9245,6 +9919,7 @@
       put("th", el["threshold-input"].value);
     }
     if (Math.abs(wx - opened[1]) > 1e-12 * Math.max(1, Math.abs(wx))) put("wx", el["window-max"].value);
+    if (clusterMinimum() > 1) put("k", String(clusterMinimum()));
     if (state.blend !== "soft") put("b", "h");
     if (state.regionStyle !== "outline") put("rs", "f");
     if (state.regionColour !== "colour") put("rc", "w");
@@ -9361,12 +10036,14 @@
     if (!report) return false;
     var endpoint = report.endpoints.filter(function (e) { return e.id === p.get("e"); })[0] ||
       report.endpoints[0];
+    // Nothing of this endpoint in the link's cohort: open the default view.
+    if (!endpoint.maps.length) return false;
     function number(key, fallback) {
       var value = Number(p.get(key));
       return p.get(key) !== null && isFinite(value) ? value : fallback;
     }
     state.report = report;
-    state.subject = p.get("s") || endpoint.subjects[0];
+    state.subject = endpoint.subjects.indexOf(p.get("s")) >= 0 ? p.get("s") : endpoint.subjects[0];
     if (p.get("f") !== null) pendingFeature = p.get("f");
     if (p.get("vr") !== null) pendingVariant = p.get("vr");
     state.mode = p.get("m") === "s" && feature("surface") ? "surface" : "volume";
@@ -9460,6 +10137,7 @@
     // selectEndpoint opens the endpoint's own window; the link's wins.
     if (p.get("th") !== null) el["threshold-input"].value = p.get("th");
     if (p.get("wx") !== null) el["window-max"].value = p.get("wx");
+    el["cluster-min"].value = p.get("k") !== null ? p.get("k") : "1";
     retuneStep(el["threshold-input"]);
     retuneStep(el["window-max"]);
     try { syncDual(); } catch (ignored) {}
@@ -9506,6 +10184,12 @@
 
   function start(manifest) {
     state.manifest = manifest;
+    try {
+      var wanted = new URLSearchParams((window.location.hash || "").replace(/^#/, "")).get("co");
+      state.cohort = (manifest.cohorts || []).some(function (c) { return c.id === wanted; })
+        ? wanted : ((manifest.cohorts || [])[0] || {}).id || "";
+    } catch (ignored) { state.cohort = ((manifest.cohorts || [])[0] || {}).id || ""; }
+    applyCohort();
     // The manifest decides how surfaces open (features.smoothShading); a link
     // or the display panel can change it from there.
     state.smoothShading = !!(manifest.features || {}).smoothShading;
@@ -9549,7 +10233,13 @@
         get marker() { return markerAt; },
         get labels() { return lastLabels; },
         renderMatrix: function () { return renderMatrix(); },
-        refreshStyle: refreshStyle
+        refreshStyle: refreshStyle,
+        // For pages that drive the viewer from outside (a slide deck in a
+        // same-origin frame): mark a surface vertex, set the camera, and find
+        // the camera that faces a vertex. See scriptedSurface* below.
+        markVertex: function (hemisphere, vertex) { return scriptedMarkVertex(hemisphere, vertex); },
+        setCamera: function (azimuth, elevation, zoom) { return scriptedSetCamera(azimuth, elevation, zoom); },
+        vertexDirection: function (hemisphere, vertex, from) { return scriptedVertexDirection(hemisphere, vertex, from); }
       };
       wire();
       wireOpacityHotkeys();

@@ -44,6 +44,7 @@ from .spec import (
     About,
     AnatomyImage,
     Atlas,
+    Cohort,
     CoordinateMaps,
     Endpoint,
     Features,
@@ -68,6 +69,7 @@ from .freesurfer import export_freesurfer_subject, sample_volume_labels
 from .surfaces import export_surfaces, package_surfaces
 
 __all__ = [
+    "Cohort",
     "About",
     "AnatomyImage",
     "Atlas",

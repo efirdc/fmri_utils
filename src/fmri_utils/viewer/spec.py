@@ -51,14 +51,19 @@ class MapEntry:
     # On a region-level endpoint (``Endpoint.region_stats``), this map's own
     # per-region results; they win over the endpoint's shared rows.
     region_rows: Sequence["RegionRow"] = ()
-    # Significance companions: -log10 p (and -log10 q) on this map's grid, from
-    # a test the page cannot redo (TFCE with sign flipping, a region test). In
-    # the page's p< and q< modes the map keeps its own colours and is shown only
-    # where the companion clears the level; ``significance_label`` names the
-    # test in the threshold readout ("TFCE FWE").
+    # Significance companions: -log10 p (and -log10 q, and -log10 of a
+    # family-wise p) on this map's grid, from a test the page cannot redo
+    # (permutations, TFCE with sign flipping, a region test). In the page's p<,
+    # q< and FWE< modes the map keeps its own colours and is shown only where
+    # the companion clears the level; the FWE< mode appears only for maps that
+    # have that companion. ``significance_label`` names the test in the
+    # threshold readout ("TFCE FWE"); ``significance_defaults`` sets the level
+    # a mode opens at, e.g. {"p": 0.005} for an uncorrected permutation p.
     significance_p: Path | None = None
     significance_q: Path | None = None
+    significance_fwe: Path | None = None
     significance_label: str = ""
+    significance_defaults: Mapping[str, float] = field(default_factory=dict)
     # The image drawn under this map instead of the template (or the
     # subject's anatomy in subject space): a registration check shows a
     # boldref under a resampled T1, in a space no other map is in.
@@ -83,6 +88,30 @@ class MapEntry:
     # coordinate maps; the builder writes a blank underlay big enough for
     # every image in both spaces.
     images: Sequence[AnatomyImage] = ()
+    # Which of the viewer's cohorts (``ViewerSpec.cohorts``) this map belongs
+    # to. A map with a cohort shows only while that cohort is chosen; one with
+    # none is shared, shown in every cohort that has no map of its own under
+    # the same subject, feature and variant. So a result that exists only for
+    # one cohort names it, and the others do not show it.
+    cohort: str = ""
+    # The degrees of freedom this map's p and q curves use, when they differ
+    # from the endpoint's for its subject (the same group t map over another
+    # cohort of participants).
+    degrees_of_freedom: int | None = None
+
+
+@dataclass(frozen=True)
+class Cohort:
+    """One set of participants a viewer can show its results for.
+
+    The first is the default. A reader switches between them in the rail; each
+    map is shown from the chosen cohort if it has one there, else the shared
+    map if there is one, else not at all (``MapEntry.cohort``).
+    """
+
+    id: str
+    label: str
+    blurb: str = ""
 
 
 @dataclass(frozen=True)
@@ -267,6 +296,9 @@ class Endpoint:
     # Surface outlines to switch on when the reader enters this endpoint:
     # "white", "pial" or "both". Empty leaves the reader's setting alone.
     outlines: str = ""
+    # The template its template-space maps are in ("MNI152NLin6Asym"), when it
+    # differs from the viewer's (ViewerSpec.template_space).
+    template_space: str = ""
 
 
 @dataclass(frozen=True)
@@ -385,6 +417,16 @@ class ViewerSpec:
     # Descriptions and related work for the region info box, keyed by region
     # name; see fmri_utils.viewer.region_info.
     region_info: dict | None = None
+    # Switchable participant sets (see ``Cohort``), and participants left out
+    # of group results, with the reason; the rail marks the latter.
+    cohorts: Sequence[Cohort] = ()
+    excluded_subjects: Mapping[str, str] = field(default_factory=dict)
+    # The template the template-space maps are in, by its TemplateFlow name
+    # ("MNI152NLin6Asym", "MNI152NLin2009cAsym"). On fsaverage, a map in a
+    # space the surface export has registration-fusion points for is sampled
+    # once per vertex at those points; any other map goes through fsaverage's
+    # MNI305 affine. Empty declares nothing, so every map takes the affine.
+    template_space: str = ""
 
     def subjects(self) -> list[str]:
         seen: list[str] = []
@@ -400,6 +442,9 @@ class ViewerSpec:
         if not self.reports:
             raise ValueError("a viewer needs at least one report")
         missing = [str(self.template)] if not Path(self.template).exists() else []
+        cohort_ids = [cohort.id for cohort in self.cohorts]
+        if len(set(cohort_ids)) != len(cohort_ids) or any(not c for c in cohort_ids):
+            raise ValueError("cohort ids must be unique and non-empty")
         for report in self.reports:
             if not report.endpoints:
                 raise ValueError(f"report {report.id} has no endpoints")
@@ -440,7 +485,15 @@ class ViewerSpec:
                 if endpoint.outlines not in ("", "white", "pial", "both"):
                     raise ValueError(f"{report.id}/{endpoint.id}: outlines must be '', 'white', "
                                      "'pial' or 'both'")
+                keys = set()
                 for entry in endpoint.maps:
+                    if entry.cohort and entry.cohort not in cohort_ids:
+                        raise ValueError(f"{report.id}/{endpoint.id}: map cohort {entry.cohort!r} "
+                                         "is not one of the viewer's cohorts")
+                    key = (entry.subject, entry.feature, entry.variant, entry.cohort or "*shared*")
+                    if key in keys:
+                        raise ValueError(f"{report.id}/{endpoint.id}: two maps for {key}")
+                    keys.add(key)
                     if not Path(entry.path).exists():
                         missing.append(str(entry.path))
                     if entry.underlay and not Path(entry.underlay).exists():
@@ -475,9 +528,13 @@ class ViewerSpec:
                                              "in subject_space")
                     if entry.subject_space_path and not Path(entry.subject_space_path).exists():
                         missing.append(str(entry.subject_space_path))
-                    for companion in (entry.significance_p, entry.significance_q):
+                    for companion in (entry.significance_p, entry.significance_q, entry.significance_fwe):
                         if companion and not Path(companion).exists():
                             missing.append(str(companion))
+                    unknown = set(entry.significance_defaults) - {"p", "q", "fwe"}
+                    if unknown:
+                        raise ValueError(f"{report.id}/{endpoint.id}: significance_defaults "
+                                         f"names {sorted(unknown)}; modes are p, q and fwe")
                     if entry.variant and entry.variant not in variant_ids:
                         raise ValueError(f"{report.id}/{endpoint.id}: map variant "
                                          f"{entry.variant!r} is not one of the endpoint's variants")

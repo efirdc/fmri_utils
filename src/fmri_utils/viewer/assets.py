@@ -25,6 +25,10 @@ def benjamini_hochberg(p_values: np.ndarray, q: float) -> float:
     return float(ordered[passed].max()) if passed.any() else 0.0
 
 
+CONVENTIONAL_P = (0.1, 0.05, 0.02, 0.01, 0.005, 0.002, 0.001, 5e-4, 1e-4, 5e-5, 1e-5, 1e-6)
+CONVENTIONAL_Q = (0.2, 0.1, 0.05, 0.02, 0.01, 0.005, 0.001)
+
+
 def statistic_curves(values: np.ndarray, degrees_of_freedom: int) -> dict:
     """Curves the viewer interpolates to turn any p or q into a threshold.
 
@@ -34,7 +38,11 @@ def statistic_curves(values: np.ndarray, degrees_of_freedom: int) -> dict:
     here on a grid and interpolated in the browser.
     """
     finite = values[np.isfinite(values) & (values != 0)]
-    p_grid = np.geomspace(1e-12, 0.5, 96)
+    # The page interpolates between grid points and is exact on them, so the
+    # levels readers type are grid points as well: between them t is concave
+    # in log p (and the BH cutoff a step function of q), and interpolating
+    # there admitted a borderline voxel or a few.
+    p_grid = np.union1d(np.geomspace(1e-12, 0.5, 96), CONVENTIONAL_P)
     curves = {
         "degrees_of_freedom": int(degrees_of_freedom),
         "p": [float(x) for x in p_grid],
@@ -42,7 +50,7 @@ def statistic_curves(values: np.ndarray, degrees_of_freedom: int) -> dict:
     }
     if finite.size:
         p_values = 2.0 * stats.t.sf(np.abs(finite), degrees_of_freedom)
-        q_grid = np.geomspace(1e-6, 0.5, 64)
+        q_grid = np.union1d(np.geomspace(1e-6, 0.5, 64), CONVENTIONAL_Q)
         q_t = []
         for q in q_grid:
             cutoff = benjamini_hochberg(p_values, float(q))

@@ -79,6 +79,13 @@ def build_viewer(spec: ViewerSpec, output_root: Path, quiet: bool = False) -> Pa
     if spec.region_info:
         manifest["region_info"] = dict(spec.region_info)
 
+    if spec.cohorts:
+        manifest["cohorts"] = [{"id": c.id, "label": c.label, "blurb": c.blurb} for c in spec.cohorts]
+    if spec.excluded_subjects:
+        manifest["excluded_subjects"] = dict(spec.excluded_subjects)
+    if spec.template_space:
+        manifest["template_space"] = spec.template_space
+
     if spec.surfaces:
         catalogue = Path(spec.surfaces) / "surfaces.json"
         if catalogue.exists():
@@ -111,6 +118,8 @@ def _orphans(manifest: dict, output_root: Path) -> list[str]:
                 used.add(entry["path"])
                 used.add(entry.get("underlay"))
                 used.update(image["path"] for image in entry.get("images", []))
+                significance = entry.get("significance") or {}
+                used.update(significance.get(mode) for mode in ("p", "q", "fwe"))
     space = manifest.get("subject_space") or {}
     for group in ("templates", "templates_2mm"):
         used.update((space.get(group) or {}).values())
@@ -181,7 +190,7 @@ def _file_stem(*parts: str) -> str:
 
 def _curves(endpoint: Endpoint, entry, values: np.ndarray) -> dict | None:
     """p and q curves for a map that is a t (or r) statistic, else None."""
-    dof = endpoint.degrees_of_freedom.get(entry.subject)
+    dof = entry.degrees_of_freedom or endpoint.degrees_of_freedom.get(entry.subject)
     variant = next((v for v in endpoint.variants if v.id == entry.variant), None)
     if not dof or (variant is not None and not variant.analytic):
         return None
@@ -295,7 +304,7 @@ def _build_endpoint(
     own = endpoint.subject_display_ranges
     anatomy = endpoint.display == "anatomy"
     for entry in endpoint.maps:
-        name = _file_stem(entry.feature or "map", entry.variant, entry.subject) + ".nii.gz"
+        name = _file_stem(entry.feature or "map", entry.variant, entry.subject, entry.cohort) + ".nii.gz"
         target = data / report.id / endpoint.id / name
         if anatomy:
             # An image, not a statistic: stored as the underlays are (once,
@@ -332,10 +341,13 @@ def _build_endpoint(
                 record["underlay"] = _canvas(entry, spec, data, root)
         if entry.variant:
             record["variant"] = entry.variant
+        if entry.cohort:
+            record["cohort"] = entry.cohort
         if entry.region_rows:
             record["region_rows"] = [_region_row(row) for row in entry.region_rows]
         significance = {}
-        for mode, companion in (("p", entry.significance_p), ("q", entry.significance_q)):
+        for mode, companion in (("p", entry.significance_p), ("q", entry.significance_q),
+                                ("fwe", entry.significance_fwe)):
             if companion:
                 sig_target = target.with_name(target.name.replace(".nii.gz", f"_neglog10{mode}.nii.gz"))
                 assets.write_map(companion, sig_target)
@@ -343,6 +355,8 @@ def _build_endpoint(
         if significance:
             if entry.significance_label:
                 significance["label"] = entry.significance_label
+            if entry.significance_defaults:
+                significance["defaults"] = {k: float(v) for k, v in entry.significance_defaults.items()}
             record["significance"] = significance
         curves = None if anatomy else _curves(endpoint, entry, values)
         if curves:
@@ -376,6 +390,8 @@ def _build_endpoint(
         out["display"] = endpoint.display
     if endpoint.outlines:
         out["outlines"] = endpoint.outlines
+    if endpoint.template_space:
+        out["template_space"] = endpoint.template_space
     if own:
         out["subject_ranges"] = {subject: [float(v) for v in window] for subject, window in own.items()}
     if endpoint.variants:
@@ -476,7 +492,7 @@ def _build_subject_space(spec: ViewerSpec, data: Path, root: Path, say) -> dict 
                 if not entry.subject_space_path:
                     continue
                 name = _file_stem(report.id, endpoint.id, entry.feature or "map",
-                                  entry.variant) + ".nii.gz"
+                                  entry.variant, entry.cohort) + ".nii.gz"
                 target = data / "subject_space" / entry.subject / name
                 _, values = assets.write_map(entry.subject_space_path, target)
                 record = {
@@ -489,6 +505,8 @@ def _build_subject_space(spec: ViewerSpec, data: Path, root: Path, say) -> dict 
                 }
                 if entry.variant:
                     record["variant"] = entry.variant
+                if entry.cohort:
+                    record["cohort"] = entry.cohort
                 # Its own curves, not the template map's: an FDR threshold is
                 # a property of the distribution of p in the map being
                 # corrected, and this map has a different voxel set.

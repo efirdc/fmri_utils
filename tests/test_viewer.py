@@ -12,6 +12,7 @@ from fmri_utils.viewer import (
     About,
     AnatomyImage,
     Atlas,
+    Cohort,
     CoordinateMaps,
     Endpoint,
     Features,
@@ -206,6 +207,111 @@ class BuildTests(unittest.TestCase):
             self.assertEqual(with_sig[0]["significance"]["label"], "TFCE FWE")
             self.assertTrue((out / with_sig[0]["significance"]["p"]).exists())
             self.assertNotIn("q", with_sig[0]["significance"])
+
+    def test_cohorts_reach_the_manifest_with_their_own_files_and_curves(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rng = np.random.default_rng(1)
+            new = _write(rng.normal(0, 1, (8, 8, 8)), root / "group_new.nii.gz")
+            old = _write(rng.normal(0, 1, (8, 8, 8)), root / "group_old.nii.gz")
+            subject = _write(rng.normal(0, 1, (8, 8, 8)), root / "sub.nii.gz")
+            spec = _spec(root, cohorts=[Cohort("n2", "2 participants"), Cohort("all", "All 3")],
+                         excluded_subjects={"sub-03": "example reason"},
+                         reports=[Report(id="r", label="R", endpoints=[Endpoint(
+                             id="e", label="E", statistic="t", degrees_of_freedom={"group": 1},
+                             maps=[MapEntry(subject="group", path=new),
+                                   MapEntry(subject="group", path=old, cohort="all", degrees_of_freedom=2),
+                                   MapEntry(subject="sub-01", path=subject)])])])
+            spec.check()
+            out = root / "viewer"
+            build_viewer(spec, out, quiet=True)
+            manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual([c["id"] for c in manifest["cohorts"]], ["n2", "all"])
+            self.assertEqual(manifest["excluded_subjects"], {"sub-03": "example reason"})
+            maps = manifest["reports"][0]["endpoints"][0]["maps"]
+            groups = [m for m in maps if m["subject"] == "group"]
+            self.assertEqual(sorted(m.get("cohort", "") for m in groups), ["", "all"])
+            self.assertEqual(len({m["path"] for m in groups}), 2)
+            # Each group map's p curve uses its own degrees of freedom.
+            by_cohort = {m.get("cohort", ""): m for m in groups}
+            self.assertNotEqual(by_cohort[""]["thresholds"], by_cohort["all"]["thresholds"])
+
+    def test_fwe_companion_and_defaults_reach_the_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rng = np.random.default_rng(3)
+            t = _write(rng.normal(0, 1, (8, 8, 8)), root / "t.nii.gz")
+            p = _write(rng.random((8, 8, 8)) * 3, root / "p.nii.gz")
+            q = _write(rng.random((8, 8, 8)), root / "q.nii.gz")
+            fwe = _write(rng.random((8, 8, 8)), root / "fwe.nii.gz")
+            spec = _spec(root, reports=[Report(id="r", label="R", endpoints=[Endpoint(
+                id="e", label="E", statistic="t", degrees_of_freedom={"group": 9},
+                maps=[MapEntry(subject="group", path=t, significance_p=p, significance_q=q,
+                               significance_fwe=fwe, significance_label="permutation",
+                               significance_defaults={"p": 0.005})])])])
+            spec.check()
+            out = root / "viewer"
+            build_viewer(spec, out, quiet=True)
+            manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+            sig = manifest["reports"][0]["endpoints"][0]["maps"][0]["significance"]
+            self.assertEqual(set(sig), {"p", "q", "fwe", "label", "defaults"})
+            self.assertEqual(sig["defaults"], {"p": 0.005})
+            self.assertTrue((out / sig["fwe"]).exists())
+            bad = _spec(root, reports=[Report(id="r", label="R", endpoints=[Endpoint(
+                id="e", label="E", maps=[MapEntry(subject="group", path=t, significance_p=p,
+                                                  significance_defaults={"fdr": 0.05})])])])
+            with self.assertRaises(ValueError):
+                bad.check()
+
+    def test_template_space_reaches_the_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base = _spec(root)
+            endpoint = base.reports[0].endpoints[0]
+            other = Endpoint(id="e2", label="E2", maps=list(endpoint.maps), template_space="MNI152NLin2009cAsym")
+            spec = _spec(root, template_space="MNI152NLin6Asym",
+                         reports=[Report(id="r", label="R", endpoints=[endpoint, other])])
+            out = root / "viewer"
+            build_viewer(spec, out, quiet=True)
+            manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["template_space"], "MNI152NLin6Asym")
+            endpoints = manifest["reports"][0]["endpoints"]
+            self.assertNotIn("template_space", endpoints[0])
+            self.assertEqual(endpoints[1]["template_space"], "MNI152NLin2009cAsym")
+            plain = root / "plain"
+            build_viewer(_spec(root), plain, quiet=True)
+            self.assertNotIn("template_space", json.loads((plain / "manifest.json").read_text(encoding="utf-8")))
+
+    def test_a_shared_map_and_a_cohort_map_may_share_a_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = _write(np.ones((8, 8, 8)), root / "m.nii.gz")
+            spec = _spec(root, cohorts=[Cohort("a", "A"), Cohort("b", "B")], reports=[
+                Report(id="r", label="R", endpoints=[Endpoint(id="e", label="E", maps=[
+                    MapEntry(subject="s", path=path),                # shared
+                    MapEntry(subject="s", path=path, cohort="b"),    # b's own
+                    MapEntry(subject="t", path=path, cohort="a"),    # only in a
+                ])])])
+            spec.check()
+            twice = _spec(root, cohorts=[Cohort("a", "A")], reports=[Report(id="r", label="R", endpoints=[
+                Endpoint(id="e", label="E", maps=[MapEntry(subject="s", path=path, cohort="a"),
+                                                  MapEntry(subject="s", path=path, cohort="a")])])])
+            with self.assertRaises(ValueError):
+                twice.check()
+
+    def test_check_rejects_an_unknown_cohort_and_a_repeated_map(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = _write(np.ones((8, 8, 8)), root / "m.nii.gz")
+            unknown = _spec(root, cohorts=[Cohort("a", "A")], reports=[Report(id="r", label="R", endpoints=[
+                Endpoint(id="e", label="E", maps=[MapEntry(subject="s", path=path, cohort="b")])])])
+            with self.assertRaises(ValueError):
+                unknown.check()
+            repeated = _spec(root, reports=[Report(id="r", label="R", endpoints=[
+                Endpoint(id="e", label="E", maps=[MapEntry(subject="s", path=path),
+                                                  MapEntry(subject="s", path=path)])])])
+            with self.assertRaises(ValueError):
+                repeated.check()
 
     def test_check_rejects_a_variant_value_no_control_offers(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

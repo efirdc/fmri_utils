@@ -142,11 +142,17 @@ def read_export_hemisphere(subject_dir, record: dict, hemisphere: str) -> dict:
 
 def atlas_vertex_labels(subject_dir, atlas, transform: np.ndarray | None = None,
                         depths: Sequence[float] = (0.1, 0.3, 0.5, 0.7, 0.9),
-                        fill_mm: float = 3.0, keep_values: Iterable[int] | None = None) -> dict:
+                        fill_mm: float = 3.0, keep_values: Iterable[int] | None = None,
+                        space: str | None = "MNI152NLin6Asym") -> dict:
     """Raw per-vertex labels for each hemisphere of an export, before cleaning.
 
     ``keep_values`` limits the labels to those values (others become 0), which
-    is how tissue classes are dropped before they are sampled.
+    is how tissue classes are dropped before they are sampled. ``space`` is the
+    atlas's template (TemplateFlow name). When the export carries registration-
+    fusion points for it (fsaverage, ``surfaces.REGFUSION``) and no ``transform``
+    is given, each vertex takes the label at its one point, as Wu et al. project;
+    otherwise the depths between white and pial are sampled as before. FSL's
+    atlases (Harvard-Oxford and the like) are MNI152NLin6Asym, the default.
     """
     import nibabel as nib
 
@@ -157,6 +163,7 @@ def atlas_vertex_labels(subject_dir, atlas, transform: np.ndarray | None = None,
         values = np.asarray(image.dataobj).astype(np.int32)
         values[~np.isin(values, list(keep_values))] = 0
         image = nib.Nifti1Image(values, image.affine)
+    explicit = transform is not None
     if transform is None and record.get("volume_transform") is not None:
         transform = np.asarray(record["volume_transform"], dtype=np.float64)
     out = {}
@@ -164,8 +171,14 @@ def atlas_vertex_labels(subject_dir, atlas, transform: np.ndarray | None = None,
         if hemisphere not in record.get("hemispheres", {}):
             continue
         mesh = read_export_hemisphere(subject_dir, record, hemisphere)
-        labels = sample_volume_labels(image, mesh["white"], mesh["pial"], depths=depths,
-                                      transform=transform, fill_mm=fill_mm)
+        points = record["hemispheres"][hemisphere].get("volume_points", {}).get(space) if space else None
+        if points and not explicit:
+            # One sample per vertex at its registration-fusion point, already in the atlas's space.
+            at = np.fromfile(subject_dir / points, dtype="<f4").reshape(-1, 3).astype(np.float64)
+            labels = sample_volume_labels(image, at, at, depths=(0.0,), transform=None, fill_mm=fill_mm)
+        else:
+            labels = sample_volume_labels(image, mesh["white"], mesh["pial"], depths=depths,
+                                          transform=transform, fill_mm=fill_mm)
         out[hemisphere] = dict(mesh, labels=labels)
     return out
 
@@ -175,7 +188,7 @@ def add_atlas_parcellation(subject_dir, atlas_id: str, label: str, atlas, region
                            depths: Sequence[float] = (0.1, 0.3, 0.5, 0.7, 0.9),
                            fill_mm: float = 3.0, smooth_rounds: int = 20,
                            exclude: Iterable[str] = (), drop_absent: bool = True,
-                           sparse: bool = False) -> dict:
+                           sparse: bool = False, space: str | None = "MNI152NLin6Asym") -> dict:
     """Sample ``atlas`` onto one subject's export and add it as a parcellation.
 
     ``subject_dir`` is one subject's folder of an ``export_surfaces`` output
@@ -193,7 +206,7 @@ def add_atlas_parcellation(subject_dir, atlas_id: str, label: str, atlas, region
     excluded = set(exclude)
     regions = [dict(r) for r in regions if r["name"] not in excluded]
     meshes = atlas_vertex_labels(subject_dir, atlas, transform=transform, depths=depths,
-                                 fill_mm=fill_mm, keep_values=[r["value"] for r in regions])
+                                 fill_mm=fill_mm, keep_values=[r["value"] for r in regions], space=space)
     if not meshes:
         raise ValueError(f"{subject_dir}: the export has no hemispheres")
     if drop_absent:

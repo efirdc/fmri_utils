@@ -123,7 +123,9 @@ The reader types any *p* or *q*, not one of a few fixed levels. That works
 because the builder stores curves rather than levels. The *p* curve is
 analytic. The *q* curve is not — a Benjamini–Hochberg threshold depends on the
 map's own distribution of *p* — so it is evaluated here at 64 values of *q* and
-interpolated in the browser. Maps with no `degrees_of_freedom` entry keep the
+interpolated in the browser. Both curves also carry the conventional levels
+(*p* .05, .01, .005, .001, …; *q* .1, .05, .01, …), where the threshold is
+exact; between them it is interpolated and can differ by a borderline voxel. Maps with no `degrees_of_freedom` entry keep the
 value threshold only.
 
 For a correlation map, `degrees_of_freedom` is the number of samples; the
@@ -144,11 +146,16 @@ Endpoint(..., variant_label="Group inference", variants=[
 
 A map with no `variant` is shown whichever variant is chosen.
 
-**Significance companions.** A test the page cannot redo -- TFCE with sign
-flipping, a region test -- can still drive the *p* and *q* modes. Give the
-map a companion volume of −log10 *p* (and of −log10 *q*) on its own grid:
-`MapEntry(significance_p=..., significance_q=..., significance_label="TFCE
-FWE")`. In *p*< or *q*< mode the map keeps its own colours (the effect, not
+**Significance companions.** A test the page cannot redo -- permutations,
+TFCE with sign flipping, a region test -- can still drive the *p* and *q*
+modes. Give the map a companion volume of −log10 *p* (and of −log10 *q*) on
+its own grid: `MapEntry(significance_p=..., significance_q=...,
+significance_label="TFCE FWE")`. A third, `significance_fwe`, is −log10 of a
+family-wise corrected *p* (a permutation max-*t*, say). It adds an **FWE <**
+mode, shown only for maps that have it. A permutation analysis can then be one
+map, the observed statistic, with *p*, *q* and FWE thresholds and **Cluster ≥**
+for extent, instead of a fixed map for each correction.
+`significance_defaults={"p": 0.005}` sets the level a mode opens at. In *p*< or *q*< mode the map keeps its own colours (the effect, not
 the statistic) and is shown only where the companion clears the level; the
 readout says `p<0.05 · TFCE FWE`. Until the companion has loaded, the map is
 held back rather than shown uncorrected. On a surface the companion is sampled
@@ -157,6 +164,27 @@ from the rows. `Variant(threshold_default=("p", 0.05))` switches the bar to that
 mode the first time the reader picks the variant, if they were on the value
 threshold. With a companion the *p* mode opens at 0.05 rather than the
 analytic default of 0.001, since the *p* is already corrected.
+
+**Minimum cluster size.** The **k ≥** box beside the threshold hides voxels
+that pass the threshold but sit in a cluster smaller than *k*. Clusters are
+face-connected (6 neighbours), with positive and negative values clustered
+apart. They are found after the brain mask and any *p*/*q* companion, which is
+the rule of the usual "p < .005, k ≥ 20" maps. Voxels under the threshold are
+not affected, so the soft blend still fades them in. *k* counts voxels of the
+map's own grid, so the same *k* is a smaller volume in a 1 mm participant map
+than in a 2.5 mm group map.
+
+On a surface, clusters are still found on the volume and carried to the
+surface through the depth points its values are averaged over. Each vertex
+remembers which voxel each of its five points landed on, in the subject's own
+surface and on fsaverage while morphing. A vertex is dropped when one of its
+points is in a voxel the rule removed and none is in a voxel that survived.
+A region-level map or a stack on a surface is not clustered, and the box is
+hidden for it.
+
+It is the page's display rule, not a cluster-level test: a permutation
+cluster-extent threshold still has to come from the analysis. The link keeps
+it as `k=`.
 
 ## Optional Parts
 
@@ -323,6 +351,35 @@ points per vertex, from the white surface to the pial, over the values the
 points find. This applies to maps, significance companions and stack images,
 on subject surfaces and fsaverage alike. The white surface alone sits on the
 grey-white boundary and reads white matter as much as cortex.
+
+**fsaverage and MNI152: registration fusion.** fsaverage's vertices are in
+MNI305, and a linear affine to MNI152 (`MNI305_TO_MNI152`) is a median 2 mm off
+(90th percentile 3.2-3.6 mm), about a cortical thickness. The fsaverage export
+therefore also carries, per hemisphere, every vertex's coordinate in FSL's
+MNI152 (MNI152NLin6Asym) from Wu et al.'s registration fusion (2018, RF-ANTs;
+`resources/regfusion/README.md`):
+
+- **Export:** `surfaces.json` → `hemispheres.<lh|rh>.volume_points =
+  {"MNI152NLin6Asym": "<lh|rh>_volume_points_MNI152NLin6Asym.bin"}`. The file
+  is float32 x, y, z interleaved per vertex, in the mesh's vertex order, in
+  millimetres. `package_surfaces` carries it into the catalogue as
+  `data/surfaces/fsaverage/...`.
+- **Sampling:** a map in that template is sampled once per vertex at its point,
+  as Wu et al. project; no depth average and no affine. The point is the
+  subject-averaged mid-thickness position (`mri_vol2surf --projfrac 0.5`).
+- **Declaring the template:** `ViewerSpec(template_space="MNI152NLin6Asym")`,
+  or `Endpoint(template_space=...)` for an endpoint whose maps are in another
+  one. The page uses a hemisphere's points only for a template-space map on
+  fsaverage whose declared template has points. That covers its values, its
+  *p*/*q*/FWE companions, **Cluster ≥** (one voxel per vertex), and a
+  participant's surface morphing to fsaverage. With nothing declared, or a
+  template without points (fMRIPrep's MNI152NLin2009cAsym, say), the map keeps
+  the affine route. A map in a subject's frame never uses the points.
+- **Atlases:** `atlas_surface.add_atlas_parcellation(..., space=...)` labels
+  fsaverage the same way. The default is MNI152NLin6Asym, the space of FSL's
+  atlases; pass `space=None` or a `transform` for the old depth sampling.
+- **Subject surfaces** have real white and pial geometry and keep the
+  five-depth average.
 
 **fsnative to fsaverage, one slider.** A subject resampled this way shares
 fsaverage's mesh vertex for vertex, so the **fsnative** and **fsaverage**
@@ -599,6 +656,47 @@ with like. The URL keeps the variant id, as for a single choice.
 `Variant.subject_display_ranges` gives the group its own window per variant,
 as `Endpoint.subject_display_ranges` does per endpoint. `ViewerSpec.check`
 rejects a variant whose `values` name an option no control offers.
+
+### Cohorts
+
+A viewer can show its results for more than one set of participants: for
+example, the group maps without some excluded participants, beside the earlier
+maps over everyone.
+
+- **Cohorts:** `ViewerSpec.cohorts` lists them as `Cohort(id, label, blurb)`.
+  The first is the default.
+- **Tagging maps:** `MapEntry.cohort` names the cohort a map belongs to. A
+  map with a cohort shows only while that cohort is chosen. One with none is
+  shared.
+- **Resolution:** for each subject, feature and variant, the page shows the
+  chosen cohort's own map, else the shared one, else nothing. So a map every
+  cohort shares (a participant's own first-level map) is listed once, with no
+  cohort. A map that differs gets the shared entry plus an entry for each
+  cohort where it differs (the group map; a participant map built from other
+  participants, like a leave-one-out template). A result that exists only for
+  one cohort names that cohort, so the others do not show it.
+- **Hidden when empty:** a subject with no map in the chosen cohort leaves the
+  subject list, and so does a variant control option. An endpoint (or report)
+  with none leaves the rail.
+- **Degrees of freedom:** `MapEntry.degrees_of_freedom` overrides the
+  endpoint's for that map's p and q curves. The same group t over another
+  cohort has other degrees of freedom.
+- **Excluded participants:** `ViewerSpec.excluded_subjects` maps a participant
+  to the reason they are left out of the group. The rail shows them in italics
+  with the reason as a tooltip. The button's text stays the ID.
+
+```python
+spec = ViewerSpec(..., cohorts=[Cohort("n28", "28 participants"), Cohort("all", "All 31 (previous)")],
+                  excluded_subjects={"sub-03": "reason shown as a tooltip"})
+MapEntry("group", new_t, degrees_of_freedom=None)               # shared; the endpoint's df
+MapEntry("group", old_t, cohort="all", degrees_of_freedom=30)   # the earlier group map, in "all"
+MapEntry("group", extra_t, variant="r1p5", cohort="n28")        # run only for n28: not in "all"
+```
+
+With two or more cohorts, **Participants** appears at the top of the rail. The
+choice is resolved before anything reads a map list, so which features and
+variants are offered, montages and the surface all follow it. URL key `co`,
+written only when it is not the default.
 
 ### Registration inspection
 
@@ -1027,6 +1125,34 @@ The layer also draws the crosshair: thin, translucent, and snapped to the
 centre of an overlay voxel. Clicking lands on a voxel centre, one wheel notch
 moves one overlay voxel, and the status bar reports the overlay's voxel and
 value. The 3D volume render is gone; it could not show the layer.
+
+## Driving It From Another Page
+
+A page in the same origin (a slide deck with the viewer in an iframe) can
+drive it through `window.__viewer`:
+
+- `markVertex(hemisphere, vertex)`: moves the surface marker and readout to a
+  vertex, as a click would. False when not in surface mode or the vertex is
+  not loaded.
+- `setCamera(azimuth, elevation, zoom?)`: the orbit drag's own steps (azimuth
+  wraps, elevation within ±89°), cheap enough to call every frame. A
+  flattened surface's camera follows the morph instead, so animate only
+  before flattening.
+- `vertexDirection(hemisphere, vertex, from?)`: the `[azimuth, elevation]`
+  that faces a vertex of the geometry on screen. `from` is `"hemisphere"`
+  (default; the direction from the hemisphere's centroid) or `"scene"` (from
+  the centre the view is framed on, which also puts the vertex mid-frame).
+
+Such pages also click the page's own buttons and hide its chrome. Keep these
+names stable, since the LeBel lab-meeting deck relies on them:
+`#modes [data-mode-kind]`, `#views [data-view]`, `#geometries [data-geometry]`,
+`#hemispheres [data-hemi]`, `#threshold-modes [data-mode]`,
+`#features [data-feature="<feature id>"]`,
+`#variants [data-control="<control id>"] [data-option="<option id>"]` (a
+variant control's buttons; the ids are the manifest's), `#variants
+[data-variant]` (an endpoint's plain variant buttons), and the `.rail`, `.bar`,
+`.shell` and `.status` classes. The colour bar (`#colorbar`) is drawn for its
+CSS height, so a host can enlarge it with CSS alone.
 
 ## Extending It
 
