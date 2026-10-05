@@ -78,6 +78,41 @@ class RegistrationQcManifestTests(unittest.TestCase):
             self.assertEqual(row["run_label"], "run-2")
             self.assertTrue(row["segmentation_mask_path"].endswith("sub-002_dseg.nii.gz"))
 
+    def test_standard_manifest_adds_mni_comparison_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            anat = root / "sub-001" / "anat"
+            func = root / "sub-001" / "func"
+            _touch(anat / "sub-001_desc-preproc_T1w.nii.gz")
+            _touch(anat / "sub-001_desc-brain_mask.nii.gz")
+            _touch(anat / "sub-001_dseg.nii.gz")
+            _touch(anat / "sub-001_space-MNI152NLin2009cAsym_dseg.nii.gz")
+            _touch(func / "sub-001_task-main_run-1_space-T1w_boldref.nii.gz")
+            _touch(func / "sub-001_task-main_run-1_space-T1w_desc-brain_mask.nii.gz")
+            _touch(func / "sub-001_task-main_run-1_space-MNI152NLin2009cAsym_boldref.nii.gz")
+            _touch(func / "sub-001_task-main_run-1_space-MNI152NLin2009cAsym_desc-brain_mask.nii.gz")
+            mni_ref = _touch(root / "tpl-MNI152NLin2009cAsym_res-01_desc-brain_T1w.nii.gz")
+            mni_mask = _touch(root / "tpl-MNI152NLin2009cAsym_res-01_desc-brain_mask.nii.gz")
+
+            out_csv = root / "manifest.csv"
+            summary = build_fmriprep_boldref_t1w_manifest(
+                FmriprepRegistrationManifestConfig(
+                    fmriprep_root=root,
+                    out_csv=out_csv,
+                    mni_reference_img=mni_ref,
+                    mni_reference_mask=mni_mask,
+                )
+            )
+            self.assertEqual(summary["n_manifest_rows"], 2)
+            self.assertEqual(summary["n_manifest_rows_by_comparison"], {"func-to-MNI": 1, "func-to-T1w": 1})
+            with out_csv.open(newline="", encoding="utf-8") as f:
+                rows = list(csv.DictReader(f))
+            self.assertEqual(rows[0]["comparison_label"], "func-to-T1w")
+            by_label = {row["comparison_label"]: row for row in rows}
+            self.assertEqual(set(by_label), {"func-to-MNI", "func-to-T1w"})
+            self.assertEqual(Path(by_label["func-to-MNI"]["reference_img_path"]), mni_ref.resolve())
+            self.assertIn("space-MNI152NLin2009cAsym", by_label["func-to-MNI"]["coreg_img_path"])
+
 
 if __name__ == "__main__":
     unittest.main()

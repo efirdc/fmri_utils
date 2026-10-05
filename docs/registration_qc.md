@@ -18,15 +18,21 @@ Optional columns:
 - `affine_transform_path`
 - `segmentation_mask_path`
 - `source_label`
+- `comparison_label`
+- `quantitative_metrics_valid` (default `true`)
 
 Notes:
 - Inputs can be on different voxel grids; by default the utility resamples coreg inputs to the reference grid.
 - For highest-resolution APNGs, use a high-resolution anatomical image as `reference_img_path`; lower-resolution functional/coreg images will be resampled to that grid for display.
 - Masks must be non-empty binary-like images (`>0` treated as mask).
+- Set `quantitative_metrics_valid=false` when masks are supplied only to define
+  APNG crop/display support. The row is still rendered, but overlap and
+  center-of-mass values are written as missing and excluded from summaries.
 - APNG plane display preserves physical voxel-size aspect ratios. This matters for anisotropic anatomical images, e.g. `0.5 x 0.8 x 0.5 mm`.
+- Slice locations and crop bounds are computed from the reference mask and reused for every run with the same subject, comparison, reference image, and reference mask. Runs therefore show exactly the same anatomical locations.
 - The optional segmentation is used only for APNG contours:
   - Binary segmentation/ribbon masks are contoured as-is.
-  - Label maps are treated as fMRIPrep-like dseg images when label `3` is present, and only label `3` is contoured.
+  - fMRIPrep-like dseg images use label `2` as the gray-matter ribbon. Contouring that ribbon draws both its inner gray/white boundary and its outer pial boundary.
   - Prefer fMRIPrep `desc-ribbon_mask` when available for fine cortical contours.
 
 ## CLI
@@ -41,6 +47,7 @@ fmri-registration-qc \
 
 Optional flags:
 - `--skip-apng`
+- `--reuse-existing-apng` (reuse valid two-frame APNGs while rebuilding metrics/reports)
 - `--apng-duration-ms 1200`
 - `--slices 7`
 - `--crop-margin-px 8`
@@ -51,7 +58,7 @@ Optional flags:
 
 Use `--apng-tile-scale` only when you intentionally want to enlarge a low-resolution grid. It does not add real resolution; for clean contours, render on the highest-resolution appropriate reference grid instead.
 
-To build a manifest directly from fMRIPrep BOLDref/T1w outputs:
+To build the standard manifest directly from fMRIPrep outputs:
 
 ```bash
 fmri-registration-qc-manifest \
@@ -69,6 +76,14 @@ fmri-registration-qc \
   --slices 7 \
   --crop-margin-px 12
 ```
+
+The standard manifest includes both:
+
+- `func-to-T1w`: T1w-space BOLD reference versus the subject's preprocessed T1w image.
+- `func-to-MNI`: MNI-space BOLD reference versus the matching `MNI152NLin2009cAsym` TemplateFlow T1w template.
+
+The first MNI run may download the small TemplateFlow reference and brain-mask files. Use `--skip-mni` to generate only the legacy T1w comparison. An explicit local template can instead be supplied with both `--mni-reference-img` and `--mni-reference-mask`.
+On a cluster, set `TEMPLATEFLOW_HOME` to a persistent project directory rather than a small home directory.
 
 ## Python API
 
@@ -91,7 +106,7 @@ print(summary["outputs"]["run_metrics_csv"])
 
 ## Recommended fMRIPrep Setup
 
-For BOLDref-to-T1w QC, a good manifest uses:
+For BOLDref-to-T1w QC, the generated manifest uses:
 
 - `reference_img_path`: `sub-*_desc-preproc_T1w.nii.gz`
 - `coreg_img_path`: `sub-*_space-T1w_boldref.nii.gz`
@@ -101,17 +116,25 @@ For BOLDref-to-T1w QC, a good manifest uses:
 
 This renders the APNG on the T1w grid. That is slower than rendering on the functional grid, but it avoids blurry upsampled APNGs and gives the best contour quality.
 
+For BOLDref-to-MNI QC, it uses:
+
+- `reference_img_path`: TemplateFlow `MNI152NLin2009cAsym` brain-extracted T1w template.
+- `coreg_img_path`: `sub-*_space-MNI152NLin2009cAsym_boldref.nii.gz`.
+- `reference_mask_path`: the corresponding TemplateFlow brain mask.
+- `coreg_mask_path`: `sub-*_space-MNI152NLin2009cAsym_desc-brain_mask.nii.gz`.
+- `segmentation_mask_path`: the subject's MNI-space dseg when available.
+
 ## Concrete Example
 
 ```bash
 fmri-registration-qc-manifest \
   --fmriprep-root D:/Datasets/3DfMRI/fmriprep/fmriprep \
-  --out-csv D:/Datasets/3DfMRI/analysis/registration_qc/fmriprep_boldref_vs_t1/manifest.csv \
+  --out-csv D:/Datasets/3DfMRI/analysis/registration_qc/fmriprep_registration/manifest.csv \
   --segmentation-source ribbon_or_dseg
 
 fmri-registration-qc \
-  --manifest-csv D:/Datasets/3DfMRI/analysis/registration_qc/fmriprep_boldref_vs_t1/manifest.csv \
-  --out-dir D:/Datasets/3DfMRI/analysis/registration_qc/fmriprep_boldref_vs_t1/full_qc \
+  --manifest-csv D:/Datasets/3DfMRI/analysis/registration_qc/fmriprep_registration/manifest.csv \
+  --out-dir D:/Datasets/3DfMRI/analysis/registration_qc/fmriprep_registration/full_qc \
   --slices 7 \
   --crop-margin-px 12
 ```
@@ -129,7 +152,10 @@ Written under `out_dir`:
 - `subject_metrics.csv`
 - `qc_summary.json`
 - `overview_heatmap.png` (single run-by-subject overview)
-- `qualitative/apng/*.png` (two-frame APNG per run: coreg first, reference second)
+- `qualitative/apng/func-to-T1w/*.png` (native anatomical registration APNGs)
+- `qualitative/apng/func-to-MNI/*.png` (template registration APNGs)
+
+Manually authored legacy manifests without `comparison_label` continue to write directly under `qualitative/apng/`.
 
 ## Metrics (v1)
 

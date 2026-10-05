@@ -40,6 +40,8 @@ class RegistrationQcRow:
     affine_transform_path: str | None = None
     segmentation_mask_path: str | None = None
     source_label: str = ""
+    comparison_label: str = ""
+    quantitative_metrics_valid: bool = True
 
 
 @dataclass(frozen=True)
@@ -48,6 +50,7 @@ class RegistrationQcConfig:
     require_matching_affine: bool = True
     auto_resample_to_reference: bool = True
     apng_enabled: bool = True
+    reuse_existing_apng: bool = False
     apng_duration_ms: int = 1200
     n_slices: int = 7
     crop_margin_px: int = 8
@@ -61,6 +64,7 @@ class RegistrationQcConfig:
     overview_heatmap_name: str = "overview_heatmap.png"
     apng_subdir: str = "qualitative/apng"
     metric_name_map: dict[str, str] | None = None
+    comparison_labels: tuple[str, ...] = ()
 
 
 REQUIRED_COLUMNS = (
@@ -76,6 +80,8 @@ OPTIONAL_COLUMNS = (
     "affine_transform_path",
     "segmentation_mask_path",
     "source_label",
+    "comparison_label",
+    "quantitative_metrics_valid",
 )
 
 
@@ -98,6 +104,17 @@ def _normalize_optional_path(value: Any) -> str | None:
     if not text or text.lower() in {"nan", "none", "null"}:
         return None
     return text
+
+
+def _parse_bool(value: Any, *, default: bool = True) -> bool:
+    if value is None or str(value).strip() == "":
+        return default
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "y"}:
+        return True
+    if normalized in {"0", "false", "no", "n"}:
+        return False
+    raise ValueError(f"Invalid boolean value: {value!r}")
 
 
 def _load_manifest_rows(manifest: str | Path | Sequence[RegistrationQcRow | Mapping[str, Any]]) -> list[RegistrationQcRow]:
@@ -130,6 +147,8 @@ def _load_manifest_rows(manifest: str | Path | Sequence[RegistrationQcRow | Mapp
                         affine_transform_path=_normalize_optional_path(row.get("affine_transform_path")),
                         segmentation_mask_path=_normalize_optional_path(row.get("segmentation_mask_path")),
                         source_label=str(row.get("source_label", "")).strip(),
+                        comparison_label=str(row.get("comparison_label", "")).strip(),
+                        quantitative_metrics_valid=_parse_bool(row.get("quantitative_metrics_valid")),
                     )
                 )
                 if not rows[-1].subject_id or not rows[-1].task:
@@ -154,6 +173,8 @@ def _load_manifest_rows(manifest: str | Path | Sequence[RegistrationQcRow | Mapp
                     affine_transform_path=_normalize_optional_path(item.get("affine_transform_path")),
                     segmentation_mask_path=_normalize_optional_path(item.get("segmentation_mask_path")),
                     source_label=str(item.get("source_label", "")).strip(),
+                    comparison_label=str(item.get("comparison_label", "")).strip(),
+                    quantitative_metrics_valid=_parse_bool(item.get("quantitative_metrics_valid")),
                 )
             )
             continue
@@ -414,6 +435,60 @@ def _choose_slice_indices(mask3d: np.ndarray, axis: int, n_slices: int, lower_pc
     return idx
 
 
+@dataclass(frozen=True)
+class _MosaicGeometry:
+    """Display geometry shared by every run in one subject/comparison."""
+
+    plane_bboxes: dict[str, tuple[slice, slice]]
+    plane_spacings: dict[str, tuple[float, float]]
+    slice_indices: dict[str, np.ndarray]
+    base_spacing: float
+    target_h: int
+    target_w: int
+
+
+def _compute_mosaic_geometry(
+    reference_mask: np.ndarray,
+    affine: np.ndarray,
+    config: RegistrationQcConfig,
+) -> _MosaicGeometry:
+    """Compute invariant slice locations and crops from a reference mask."""
+    row_defs = [("axial", 2), ("coronal", 1), ("sagittal", 0)]
+    slice_pct_ranges = {"axial": (18.0, 96.0), "coronal": (8.0, 94.0), "sagittal": (6.0, 94.0)}
+    crop_margin_px = int(config.crop_margin_px)
+    n_slices = int(config.n_slices)
+
+    voxel_sizes = np.asarray(nib.affines.voxel_sizes(affine), dtype=np.float64)
+    finite_voxel_sizes = voxel_sizes[np.isfinite(voxel_sizes) & (voxel_sizes > 0)]
+    base_spacing = float(np.min(finite_voxel_sizes)) if finite_voxel_sizes.size else 1.0
+    plane_bboxes: dict[str, tuple[slice, slice]] = {}
+    plane_spacings: dict[str, tuple[float, float]] = {}
+    slice_indices: dict[str, np.ndarray] = {}
+    plane_sizes: list[tuple[int, int]] = []
+
+    mask = np.asarray(reference_mask, dtype=bool)
+    for row_name, axis in row_defs:
+        plane_mask = _display_plane_content_mask(mask, axis)
+        bbox2d = _compute_2d_bbox(plane_mask, margin=crop_margin_px)
+        row_spacing, col_spacing = _display_plane_spacings(affine, axis)
+        lo_pct, hi_pct = slice_pct_ranges[row_name]
+        plane_bboxes[row_name] = bbox2d
+        plane_spacings[row_name] = (row_spacing, col_spacing)
+        slice_indices[row_name] = _choose_slice_indices(mask, axis, n_slices, lo_pct, hi_pct)
+        plane_h = int(round((bbox2d[0].stop - bbox2d[0].start) * row_spacing / base_spacing))
+        plane_w = int(round((bbox2d[1].stop - bbox2d[1].start) * col_spacing / base_spacing))
+        plane_sizes.append((max(1, plane_h), max(1, plane_w)))
+
+    return _MosaicGeometry(
+        plane_bboxes=plane_bboxes,
+        plane_spacings=plane_spacings,
+        slice_indices=slice_indices,
+        base_spacing=base_spacing,
+        target_h=max(h for h, _ in plane_sizes),
+        target_w=max(w for _, w in plane_sizes),
+    )
+
+
 def _axis_world_mm_for_index(affine: np.ndarray, shape: tuple[int, int, int], axis: int, idx: int) -> float:
     vox = (np.array(shape, dtype=np.float64) - 1.0) / 2.0
     vox[axis] = float(idx)
@@ -489,9 +564,10 @@ def _segmentation_slice_to_contour_mask(seg2d: np.ndarray) -> np.ndarray:
     """Match the legacy DATT convention for segmentation contours.
 
     Binary masks are treated as an explicit ribbon/contour mask. Label maps are
-    interpreted as fMRIPrep tissue dseg outputs, where label 3 is the WM class
-    used by the old QC renderer. Using all nonzero labels turns dseg into a
-    single whole-brain hull, which is not useful for registration QC.
+    interpreted as fMRIPrep tissue dseg outputs. Label 2 is the gray-matter
+    ribbon; contouring it draws both its inner gray/white boundary and its
+    outer pial boundary. Using all nonzero labels instead turns dseg into a
+    single whole-brain hull and loses the gray/white boundary.
     """
     arr = np.asarray(seg2d)
     finite = np.isfinite(arr)
@@ -503,8 +579,8 @@ def _segmentation_slice_to_contour_mask(seg2d: np.ndarray) -> np.ndarray:
         return np.zeros(arr.shape, dtype=bool)
     if nonzero.size <= 1 and np.allclose(nonzero, 1.0):
         return finite & (arr > 0)
-    if np.any(np.isclose(vals, 3.0)):
-        return finite & np.isclose(arr, 3.0)
+    if np.any(np.isclose(vals, 2.0)) and np.any(np.isclose(vals, 3.0)):
+        return finite & np.isclose(arr, 2.0)
     return finite & (arr > 0)
 
 
@@ -515,32 +591,15 @@ def _render_mosaic_image(
     segmentation_mask: np.ndarray | None,
     title: str,
     config: RegistrationQcConfig,
+    geometry: _MosaicGeometry | None = None,
 ) -> Image.Image:
     vol = _robust_normalize(volume)
     n_slices = int(config.n_slices)
-    crop_margin_px = int(config.crop_margin_px)
     font_size = int(config.font_size)
     row_defs = [("axial", 2, "z"), ("coronal", 1, "y"), ("sagittal", 0, "x")]
-    slice_pct_ranges = {"axial": (18.0, 96.0), "coronal": (8.0, 94.0), "sagittal": (6.0, 94.0)}
-
-    plane_bboxes: dict[str, tuple[slice, slice]] = {}
-    plane_sizes: list[tuple[int, int]] = []
-    plane_spacings: dict[str, tuple[float, float]] = {}
-    voxel_sizes = np.asarray(nib.affines.voxel_sizes(affine), dtype=np.float64)
-    finite_voxel_sizes = voxel_sizes[np.isfinite(voxel_sizes) & (voxel_sizes > 0)]
-    base_spacing = float(np.min(finite_voxel_sizes)) if finite_voxel_sizes.size else 1.0
-    for row_name, axis, _ in row_defs:
-        plane_mask = _display_plane_content_mask(content_mask.astype(bool), axis)
-        bbox2d = _compute_2d_bbox(plane_mask, margin=crop_margin_px)
-        plane_bboxes[row_name] = bbox2d
-        row_spacing, col_spacing = _display_plane_spacings(affine, axis)
-        plane_spacings[row_name] = (row_spacing, col_spacing)
-        plane_h = int(round((bbox2d[0].stop - bbox2d[0].start) * row_spacing / base_spacing))
-        plane_w = int(round((bbox2d[1].stop - bbox2d[1].start) * col_spacing / base_spacing))
-        plane_sizes.append((max(1, plane_h), max(1, plane_w)))
-
-    target_h = max(h for h, _ in plane_sizes)
-    target_w = max(w for _, w in plane_sizes)
+    display = geometry or _compute_mosaic_geometry(content_mask, affine, config)
+    target_h = int(display.target_h)
+    target_w = int(display.target_w)
     tile_scale = max(1, int(config.apng_tile_scale))
     tile_h = int(target_h * tile_scale)
     tile_w = int(target_w * tile_scale)
@@ -569,10 +628,9 @@ def _render_mosaic_image(
 
     y0 = border + title_h
     for r, (row_name, axis, axis_char) in enumerate(row_defs):
-        lo_pct, hi_pct = slice_pct_ranges[row_name]
-        indices = _choose_slice_indices(content_mask, axis, n_slices, lo_pct, hi_pct)
-        bbox2d = plane_bboxes[row_name]
-        row_spacing, col_spacing = plane_spacings[row_name]
+        indices = display.slice_indices[row_name]
+        bbox2d = display.plane_bboxes[row_name]
+        row_spacing, col_spacing = display.plane_spacings[row_name]
         for c, idx in enumerate(indices):
             sl = _extract_slice_for_display(vol, axis, int(idx))
             sl = _crop_2d(sl, bbox2d)
@@ -580,7 +638,7 @@ def _render_mosaic_image(
                 sl,
                 row_spacing=row_spacing,
                 col_spacing=col_spacing,
-                base_spacing=base_spacing,
+                base_spacing=display.base_spacing,
                 is_mask=False,
             )
             sl = _pad_to_size(sl, target_h, target_w)
@@ -595,7 +653,7 @@ def _render_mosaic_image(
                     seg2d,
                     row_spacing=row_spacing,
                     col_spacing=col_spacing,
-                    base_spacing=base_spacing,
+                    base_spacing=display.base_spacing,
                     is_mask=True,
                 )
                 seg2d = _pad_to_size(seg2d, target_h, target_w)
@@ -639,10 +697,22 @@ def _build_apng(frame_a: Image.Image, frame_b: Image.Image, out_path: Path, dura
         return False
 
 
+def _is_valid_two_frame_apng(path: Path) -> bool:
+    if not path.exists() or not PIL_AVAILABLE:
+        return False
+    try:
+        with Image.open(path) as image:
+            return int(getattr(image, "n_frames", 1)) == 2
+    except Exception:
+        return False
+
+
 def _run_axis_label(row: Mapping[str, Any]) -> str:
+    comparison = str(row.get("comparison_label", "")).strip()
     task = str(row.get("task", "")).strip()
     run_label = str(row.get("run_label", "")).strip()
-    return f"{task}:{run_label}" if run_label else task
+    run_part = f"{task}:{run_label}" if run_label else task
+    return f"{comparison}/{run_part}" if comparison else run_part
 
 
 def _run_sort_key(label: str) -> tuple[str, int, str]:
@@ -797,9 +867,10 @@ def _write_csv(path: Path, rows: list[dict[str, Any]], fieldnames: Sequence[str]
 
 
 def _subject_summary(run_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    rows_by_subject: dict[str, list[dict[str, Any]]] = {}
+    rows_by_subject: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for row in run_rows:
-        rows_by_subject.setdefault(str(row["subject_id"]), []).append(row)
+        key = (str(row["subject_id"]), str(row.get("comparison_label", "")))
+        rows_by_subject.setdefault(key, []).append(row)
 
     subject_rows: list[dict[str, Any]] = []
     metric_keys = [
@@ -810,8 +881,12 @@ def _subject_summary(run_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         "transform_translation_norm_mm",
         "transform_rotation_deg",
     ]
-    for subject, items in sorted(rows_by_subject.items()):
-        out: dict[str, Any] = {"subject_id": subject, "n_runs": len(items)}
+    for (subject, comparison), items in sorted(rows_by_subject.items()):
+        out: dict[str, Any] = {
+            "subject_id": subject,
+            "comparison_label": comparison,
+            "n_runs": len(items),
+        }
         for key in metric_keys:
             vals = np.asarray([_safe_float(x.get(key, float("nan"))) for x in items], dtype=np.float64)
             vals = vals[np.isfinite(vals)]
@@ -827,6 +902,11 @@ def _subject_summary(run_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return subject_rows
 
 
+def _safe_path_component(value: str) -> str:
+    text = re.sub(r"[^A-Za-z0-9._-]+", "_", str(value).strip())
+    return text.strip("._")
+
+
 def run_registration_qc(
     manifest: str | Path | Sequence[RegistrationQcRow | Mapping[str, Any]],
     out_dir: str | Path,
@@ -834,6 +914,11 @@ def run_registration_qc(
 ) -> dict[str, Any]:
     cfg = config or RegistrationQcConfig()
     rows = _load_manifest_rows(manifest)
+    if cfg.comparison_labels:
+        requested = {str(value).strip() for value in cfg.comparison_labels if str(value).strip()}
+        rows = [row for row in rows if row.comparison_label in requested]
+        if not rows:
+            raise ValueError(f"No manifest rows matched comparison_labels={sorted(requested)}")
     out_root = Path(out_dir)
     _ensure_dir(out_root)
     apng_root = out_root / cfg.apng_subdir
@@ -842,7 +927,9 @@ def run_registration_qc(
 
     run_metrics: list[dict[str, Any]] = []
     apng_created = 0
+    apng_reused = 0
     auto_resample_applied_runs = 0
+    geometry_cache: dict[tuple[str, str, str, str], _MosaicGeometry] = {}
 
     for row in rows:
         ref_img_path = _to_path(row.reference_img_path, row, "reference_img_path")
@@ -855,10 +942,18 @@ def run_registration_qc(
         assert ref_img_path is not None and coreg_img_path is not None
         assert ref_mask_path is not None and coreg_mask_path is not None
 
+        apng_name = f"{row.subject_id}__task-{row.task}" + (f"__{row.run_label}" if row.run_label else "") + ".png"
+        comparison_dir = _safe_path_component(row.comparison_label)
+        apng_dir = apng_root / comparison_dir if comparison_dir else apng_root
+        apng_path = apng_dir / apng_name
+        reuse_apng = bool(cfg.apng_enabled and cfg.reuse_existing_apng and _is_valid_two_frame_apng(apng_path))
+        if reuse_apng:
+            apng_reused += 1
+
         ref_img = _load_img(ref_img_path)
         coreg_img = None
         coreg_img_resampled = False
-        if cfg.apng_enabled:
+        if cfg.apng_enabled and not reuse_apng:
             coreg_img_raw = _load_img(coreg_img_path)
             coreg_img, coreg_img_resampled = _align_to_reference_grid(
                 coreg_img_raw,
@@ -927,11 +1022,14 @@ def run_registration_qc(
         com_coreg = _center_of_mass_world(coreg_mask, np.asarray(ref_img.affine, dtype=np.float64))
         com_dist = float(np.linalg.norm(com_ref - com_coreg)) if (com_ref is not None and com_coreg is not None) else float("nan")
 
+        quantitative_metrics_valid = bool(row.quantitative_metrics_valid)
         metric_row: dict[str, Any] = {
             "subject_id": row.subject_id,
             "task": row.task,
             "run_label": row.run_label,
             "source_label": row.source_label or "",
+            "comparison_label": row.comparison_label or "",
+            "quantitative_metrics_valid": int(quantitative_metrics_valid),
             "reference_img_path": str(ref_img_path),
             "coreg_img_path": str(coreg_img_path),
             "reference_mask_path": str(ref_mask_path),
@@ -945,29 +1043,63 @@ def run_registration_qc(
             "segmentation_mask_resampled": int(seg_resampled),
             "n_reference_mask_voxels": ref_vox,
             "n_coreg_mask_voxels": coreg_vox,
-            "n_intersection_voxels": inter,
-            "n_union_voxels": union,
-            "jaccard": _jaccard(ref_mask, coreg_mask),
-            "pct_reference_covered_by_coreg_mask": (inter / ref_vox * 100.0) if ref_vox > 0 else float("nan"),
-            "pct_coreg_mask_within_reference": (inter / coreg_vox * 100.0) if coreg_vox > 0 else float("nan"),
-            "com_distance_mm": com_dist,
+            "n_intersection_voxels": inter if quantitative_metrics_valid else float("nan"),
+            "n_union_voxels": union if quantitative_metrics_valid else float("nan"),
+            "jaccard": _jaccard(ref_mask, coreg_mask) if quantitative_metrics_valid else float("nan"),
+            "pct_reference_covered_by_coreg_mask": (
+                inter / ref_vox * 100.0 if quantitative_metrics_valid and ref_vox > 0 else float("nan")
+            ),
+            "pct_coreg_mask_within_reference": (
+                inter / coreg_vox * 100.0 if quantitative_metrics_valid and coreg_vox > 0 else float("nan")
+            ),
+            "com_distance_mm": com_dist if quantitative_metrics_valid else float("nan"),
         }
         metric_row.update(_compute_affine_metrics(xfm_path))
         run_metrics.append(metric_row)
 
-        if cfg.apng_enabled:
+        if cfg.apng_enabled and not reuse_apng:
             if not PIL_AVAILABLE:
                 raise RuntimeError("Pillow is required for APNG output but is not installed.")
             if coreg_img is None:
                 raise RuntimeError("Internal error: APNG requested but coreg image was not loaded.")
             ref_vol = np.asarray(ref_img.dataobj, dtype=np.float32)
             coreg_vol = np.asarray(coreg_img.dataobj, dtype=np.float32)
-            content_mask = np.logical_or(ref_mask, coreg_mask)
-            title = f"{row.subject_id} | task-{row.task}" + (f" | {row.run_label}" if row.run_label else "") + " | coreg vs reference"
-            frame_coreg = _render_mosaic_image(coreg_vol, np.asarray(ref_img.affine), content_mask, seg_mask, title, cfg)
-            frame_ref = _render_mosaic_image(ref_vol, np.asarray(ref_img.affine), content_mask, seg_mask, title, cfg)
-            apng_name = f"{row.subject_id}__task-{row.task}" + (f"__{row.run_label}" if row.run_label else "") + ".png"
-            if _build_apng(frame_coreg, frame_ref, apng_root / apng_name, int(cfg.apng_duration_ms)):
+            geometry_key = (
+                row.subject_id,
+                row.comparison_label,
+                str(ref_img_path),
+                str(ref_mask_path),
+            )
+            geometry = geometry_cache.get(geometry_key)
+            if geometry is None:
+                geometry = _compute_mosaic_geometry(ref_mask, np.asarray(ref_img.affine), cfg)
+                geometry_cache[geometry_key] = geometry
+            comparison_text = f" | {row.comparison_label}" if row.comparison_label else ""
+            title = (
+                f"{row.subject_id} | task-{row.task}"
+                + (f" | {row.run_label}" if row.run_label else "")
+                + comparison_text
+                + " | coreg vs reference"
+            )
+            frame_coreg = _render_mosaic_image(
+                coreg_vol,
+                np.asarray(ref_img.affine),
+                ref_mask,
+                seg_mask,
+                title,
+                cfg,
+                geometry=geometry,
+            )
+            frame_ref = _render_mosaic_image(
+                ref_vol,
+                np.asarray(ref_img.affine),
+                ref_mask,
+                seg_mask,
+                title,
+                cfg,
+                geometry=geometry,
+            )
+            if _build_apng(frame_coreg, frame_ref, apng_path, int(cfg.apng_duration_ms)):
                 apng_created += 1
 
     run_fields = [
@@ -975,6 +1107,8 @@ def run_registration_qc(
         "task",
         "run_label",
         "source_label",
+        "comparison_label",
+        "quantitative_metrics_valid",
         "reference_img_path",
         "coreg_img_path",
         "reference_mask_path",
@@ -1003,6 +1137,7 @@ def run_registration_qc(
     subject_rows = _subject_summary(run_metrics)
     subject_fields = [
         "subject_id",
+        "comparison_label",
         "n_runs",
         "jaccard_mean",
         "jaccard_min",
@@ -1030,14 +1165,19 @@ def run_registration_qc(
     if cfg.write_overview_heatmap:
         _write_overview_heatmap(run_metrics, overview_heatmap_path, cfg)
 
+    quantitative_rows = [row for row in run_metrics if int(row.get("quantitative_metrics_valid", 1)) == 1]
     summary = {
         "timestamp_utc": _now_iso(),
         "n_runs": len(run_metrics),
         "n_subjects": len({str(r["subject_id"]) for r in run_metrics}),
+        "comparisons": sorted({str(r.get("comparison_label", "")) for r in run_metrics}),
         "manifest_rows": len(rows),
+        "quantitative_metric_rows": len(quantitative_rows),
+        "display_geometries": len(geometry_cache),
         "auto_resample_applied_runs": int(auto_resample_applied_runs),
         "apng_enabled": bool(cfg.apng_enabled),
         "apng_created": int(apng_created),
+        "apng_reused": int(apng_reused),
         "outputs": {
             "run_metrics_csv": str(run_metrics_path),
             "subject_metrics_csv": str(subject_metrics_path),
@@ -1046,19 +1186,19 @@ def run_registration_qc(
             "apng_dir": str(apng_root) if cfg.apng_enabled else "",
         },
         "metric_summary": {
-            "jaccard": _summarize_numeric([_safe_float(x.get("jaccard", float("nan"))) for x in run_metrics]),
+            "jaccard": _summarize_numeric([_safe_float(x.get("jaccard", float("nan"))) for x in quantitative_rows]),
             "pct_reference_covered_by_coreg_mask": _summarize_numeric(
-                [_safe_float(x.get("pct_reference_covered_by_coreg_mask", float("nan"))) for x in run_metrics]
+                [_safe_float(x.get("pct_reference_covered_by_coreg_mask", float("nan"))) for x in quantitative_rows]
             ),
             "pct_coreg_mask_within_reference": _summarize_numeric(
-                [_safe_float(x.get("pct_coreg_mask_within_reference", float("nan"))) for x in run_metrics]
+                [_safe_float(x.get("pct_coreg_mask_within_reference", float("nan"))) for x in quantitative_rows]
             ),
-            "com_distance_mm": _summarize_numeric([_safe_float(x.get("com_distance_mm", float("nan"))) for x in run_metrics]),
+            "com_distance_mm": _summarize_numeric([_safe_float(x.get("com_distance_mm", float("nan"))) for x in quantitative_rows]),
             "transform_translation_norm_mm": _summarize_numeric(
-                [_safe_float(x.get("transform_translation_norm_mm", float("nan"))) for x in run_metrics]
+                [_safe_float(x.get("transform_translation_norm_mm", float("nan"))) for x in quantitative_rows]
             ),
             "transform_rotation_deg": _summarize_numeric(
-                [_safe_float(x.get("transform_rotation_deg", float("nan"))) for x in run_metrics]
+                [_safe_float(x.get("transform_rotation_deg", float("nan"))) for x in quantitative_rows]
             ),
         },
         "worst_runs_by_jaccard": [
@@ -1066,10 +1206,11 @@ def run_registration_qc(
                 "subject_id": x["subject_id"],
                 "task": x["task"],
                 "run_label": x["run_label"],
+                "comparison_label": x.get("comparison_label", ""),
                 "jaccard": _safe_float(x.get("jaccard", float("nan"))),
             }
             for x in sorted(
-                run_metrics,
+                quantitative_rows,
                 key=lambda r: _safe_float(r.get("jaccard", float("nan")))
                 if np.isfinite(_safe_float(r.get("jaccard", float("nan"))))
                 else 999.0,
@@ -1089,6 +1230,12 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--manifest-csv", required=True, type=Path, help="Path to manifest CSV.")
     parser.add_argument("--out-dir", required=True, type=Path, help="Output directory.")
     parser.add_argument("--skip-apng", action="store_true", help="Disable APNG output.")
+    parser.add_argument(
+        "--comparison-labels",
+        default="",
+        help="Optional comma-separated comparison_label filter, e.g. func-to-MNI.",
+    )
+    parser.add_argument("--reuse-existing-apng", action="store_true", help="Reuse existing valid two-frame APNGs.")
     parser.add_argument("--apng-duration-ms", type=int, default=1200, help="Frame duration per APNG frame in milliseconds.")
     parser.add_argument("--slices", type=int, default=7, help="Slices per plane in mosaic.")
     parser.add_argument("--crop-margin-px", type=int, default=8, help="Per-plane crop margin in displayed pixels.")
@@ -1112,6 +1259,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     args = _parse_args(argv)
     config = RegistrationQcConfig(
         apng_enabled=not bool(args.skip_apng),
+        reuse_existing_apng=bool(args.reuse_existing_apng),
         apng_duration_ms=int(args.apng_duration_ms),
         n_slices=int(args.slices),
         crop_margin_px=int(args.crop_margin_px),
@@ -1119,6 +1267,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         font_size=int(args.font_size),
         write_overview_heatmap=not bool(args.no_overview_heatmap),
         overview_heatmap_name=str(args.overview_heatmap_name),
+        comparison_labels=tuple(x.strip() for x in str(args.comparison_labels).split(",") if x.strip()),
     )
     summary = run_registration_qc(args.manifest_csv, args.out_dir, config)
     print(f"Wrote run metrics: {summary['outputs']['run_metrics_csv']}")

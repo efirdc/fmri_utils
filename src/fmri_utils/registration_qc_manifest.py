@@ -21,6 +21,7 @@ MANIFEST_COLUMNS = [
     "affine_transform_path",
     "segmentation_mask_path",
     "source_label",
+    "comparison_label",
 ]
 
 
@@ -36,6 +37,11 @@ class FmriprepRegistrationManifestConfig:
     segmentation_source: str = "ribbon_or_dseg"
     require_space_t1w: bool = True
     source_label: str = "fmriprep_T1w"
+    include_mni: bool = True
+    mni_space: str = "MNI152NLin2009cAsym"
+    mni_resolution: int = 1
+    mni_reference_img: str | Path | None = None
+    mni_reference_mask: str | Path | None = None
 
 
 def _now_iso() -> str:
@@ -108,6 +114,53 @@ def _pick_segmentation(anat_dir: Path, subject_id: str, mode: str) -> Path | Non
     raise ValueError("segmentation_source must be one of: none, ribbon, dseg, ribbon_or_dseg")
 
 
+def _pick_mni_segmentation(anat_dir: Path, subject_id: str, space: str, mode: str) -> Path | None:
+    mode = str(mode).strip().lower()
+    dseg = anat_dir / f"{subject_id}_space-{space}_dseg.nii.gz"
+    if mode in {"dseg", "ribbon_or_dseg"}:
+        return dseg if dseg.exists() else None
+    if mode in {"none", "ribbon"}:
+        return None
+    raise ValueError("segmentation_source must be one of: none, ribbon, dseg, ribbon_or_dseg")
+
+
+def _resolve_mni_reference(config: FmriprepRegistrationManifestConfig) -> tuple[Path, Path]:
+    if config.mni_reference_img is not None or config.mni_reference_mask is not None:
+        if config.mni_reference_img is None or config.mni_reference_mask is None:
+            raise ValueError("mni_reference_img and mni_reference_mask must be provided together")
+        image_path = Path(config.mni_reference_img)
+        mask_path = Path(config.mni_reference_mask)
+    else:
+        try:
+            from templateflow import api as templateflow_api
+        except ImportError as exc:
+            raise ImportError(
+                "TemplateFlow is required for default MNI registration QC. Install templateflow or pass "
+                "mni_reference_img and mni_reference_mask explicitly."
+            ) from exc
+        image_path = Path(
+            templateflow_api.get(
+                config.mni_space,
+                resolution=int(config.mni_resolution),
+                desc="brain",
+                suffix="T1w",
+                extension="nii.gz",
+            )
+        )
+        mask_path = Path(
+            templateflow_api.get(
+                config.mni_space,
+                resolution=int(config.mni_resolution),
+                desc="brain",
+                suffix="mask",
+                extension="nii.gz",
+            )
+        )
+    if not image_path.exists() or not mask_path.exists():
+        raise FileNotFoundError(f"MNI reference image/mask not found: {image_path}, {mask_path}")
+    return image_path.resolve(), mask_path.resolve()
+
+
 def _discover_t1w_images(fmriprep_root: Path) -> list[Path]:
     return sorted(
         path for path in fmriprep_root.glob("**/anat/sub-*_desc-preproc_T1w.nii.gz") if "_space-" not in path.name
@@ -147,9 +200,12 @@ def build_fmriprep_boldref_t1w_manifest(
         "missing_func_dir": 0,
         "missing_coreg_mask": 0,
         "missing_or_rejected_boldref": 0,
+        "missing_mni_boldref": 0,
+        "missing_mni_coreg_mask": 0,
     }
     segmentation_counts: dict[str, int] = {"ribbon": 0, "dseg": 0, "none": 0}
     t1w_paths = _discover_t1w_images(fmriprep_root)
+    mni_reference: tuple[Path, Path] | None = None
 
     for t1w_path in t1w_paths:
         subject_id = _entity(t1w_path.name, "sub")
@@ -182,7 +238,6 @@ def build_fmriprep_boldref_t1w_manifest(
             boldrefs = [p for p in boldrefs if "_space-T1w_" in p.name]
         if not boldrefs:
             skip_counts["missing_or_rejected_boldref"] += 1
-            continue
 
         for boldref in boldrefs:
             task = _entity(boldref.name, "task")
@@ -208,10 +263,67 @@ def build_fmriprep_boldref_t1w_manifest(
                     "affine_transform_path": str(transform) if transform.exists() else "",
                     "segmentation_mask_path": str(seg_path) if seg_path is not None else "",
                     "source_label": str(config.source_label),
+                    "comparison_label": "func-to-T1w",
                 }
             )
 
-    rows.sort(key=lambda r: (r["subject_id"], r["task"], _run_sort_value(r["run_label"]), r["coreg_img_path"]))
+        if not config.include_mni:
+            continue
+
+        mni_boldrefs = sorted(
+            p
+            for p in func_dir.glob(f"{subject_id}_task-*_space-{config.mni_space}_boldref.nii.gz")
+            if f"_space-{config.mni_space}_" in p.name
+        )
+        if not mni_boldrefs:
+            skip_counts["missing_mni_boldref"] += 1
+            continue
+        if mni_reference is None:
+            mni_reference = _resolve_mni_reference(config)
+        mni_ref_img, mni_ref_mask = mni_reference
+        mni_seg_path = _pick_mni_segmentation(
+            anat_dir,
+            subject_id,
+            config.mni_space,
+            config.segmentation_source,
+        )
+
+        for boldref in mni_boldrefs:
+            task = _entity(boldref.name, "task")
+            run_label = _normalize_run_label(_entity(boldref.name, "run"))
+            if task_filter and task not in task_filter:
+                continue
+            if run_filter and run_label not in run_filter:
+                continue
+            coreg_mask = _bold_mask_for_boldref(boldref)
+            if not coreg_mask.exists():
+                skip_counts["missing_mni_coreg_mask"] += 1
+                continue
+            rows.append(
+                {
+                    "subject_id": subject_id,
+                    "task": task,
+                    "run_label": run_label,
+                    "reference_img_path": str(mni_ref_img),
+                    "coreg_img_path": str(boldref),
+                    "reference_mask_path": str(mni_ref_mask),
+                    "coreg_mask_path": str(coreg_mask),
+                    "affine_transform_path": "",
+                    "segmentation_mask_path": str(mni_seg_path) if mni_seg_path is not None else "",
+                    "source_label": f"fmriprep_{config.mni_space}",
+                    "comparison_label": "func-to-MNI",
+                }
+            )
+
+    rows.sort(
+        key=lambda r: (
+            r["subject_id"],
+            {"func-to-T1w": 0, "func-to-MNI": 1}.get(r["comparison_label"], 99),
+            r["task"],
+            _run_sort_value(r["run_label"]),
+            r["coreg_img_path"],
+        )
+    )
     if not rows:
         raise ValueError(f"No manifest rows discovered under {fmriprep_root}")
 
@@ -236,6 +348,10 @@ def build_fmriprep_boldref_t1w_manifest(
         "summary_json": str(summary_json),
         "n_t1w_images": len(t1w_paths),
         "n_manifest_rows": len(rows),
+        "n_manifest_rows_by_comparison": {
+            label: sum(r["comparison_label"] == label for r in rows)
+            for label in sorted({r["comparison_label"] for r in rows})
+        },
         "n_subjects": len({r["subject_id"] for r in rows}),
         "skip_counts": skip_counts,
         "segmentation_counts_by_subject": segmentation_counts,
@@ -246,8 +362,15 @@ def build_fmriprep_boldref_t1w_manifest(
     return summary
 
 
+def build_fmriprep_registration_manifest(
+    config: FmriprepRegistrationManifestConfig,
+) -> dict[str, object]:
+    """Build the standard fMRIPrep T1w and MNI registration-QC manifest."""
+    return build_fmriprep_boldref_t1w_manifest(config)
+
+
 def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Build a registration QC manifest from fMRIPrep BOLDref/T1w outputs.")
+    parser = argparse.ArgumentParser(description="Build standard BOLDref-to-T1w and BOLDref-to-MNI fMRIPrep QC rows.")
     parser.add_argument("--fmriprep-root", required=True, type=Path, help="fMRIPrep derivatives root.")
     parser.add_argument("--out-csv", required=True, type=Path, help="Full manifest CSV to write.")
     parser.add_argument("--one-row-csv", type=Path, default=None, help="Optional one-row smoke-test manifest path.")
@@ -267,12 +390,17 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Include BOLDrefs not explicitly labeled space-T1w.",
     )
     parser.add_argument("--source-label", default="fmriprep_T1w", help="source_label value written to manifest.")
+    parser.add_argument("--skip-mni", action="store_true", help="Generate only BOLDref-to-T1w rows.")
+    parser.add_argument("--mni-space", default="MNI152NLin2009cAsym", help="fMRIPrep MNI output-space label.")
+    parser.add_argument("--mni-resolution", type=int, default=1, help="TemplateFlow MNI reference resolution in mm.")
+    parser.add_argument("--mni-reference-img", type=Path, default=None, help="Optional explicit MNI T1 reference image.")
+    parser.add_argument("--mni-reference-mask", type=Path, default=None, help="Optional explicit MNI brain mask.")
     return parser.parse_args(argv)
 
 
 def main(argv: Sequence[str] | None = None) -> None:
     args = _parse_args(argv)
-    summary = build_fmriprep_boldref_t1w_manifest(
+    summary = build_fmriprep_registration_manifest(
         FmriprepRegistrationManifestConfig(
             fmriprep_root=args.fmriprep_root,
             out_csv=args.out_csv,
@@ -284,6 +412,11 @@ def main(argv: Sequence[str] | None = None) -> None:
             segmentation_source=args.segmentation_source,
             require_space_t1w=not bool(args.allow_non_space_t1w),
             source_label=str(args.source_label),
+            include_mni=not bool(args.skip_mni),
+            mni_space=str(args.mni_space),
+            mni_resolution=int(args.mni_resolution),
+            mni_reference_img=args.mni_reference_img,
+            mni_reference_mask=args.mni_reference_mask,
         )
     )
     print(f"Wrote manifest: {summary['out_csv']}")
@@ -296,6 +429,7 @@ __all__ = [
     "FmriprepRegistrationManifestConfig",
     "MANIFEST_COLUMNS",
     "build_fmriprep_boldref_t1w_manifest",
+    "build_fmriprep_registration_manifest",
     "main",
 ]
 
