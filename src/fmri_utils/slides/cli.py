@@ -1,7 +1,7 @@
 """fmri-slides: make, serve, edit and bundle web slide decks that embed fmri_utils viewers.
 
     fmri-slides new DECK --title "My talk" [--name talk-2026-10-06] [--public-base URL]
-                         [--mount lebel=../results/viewer ...]
+                         [--mount viewer=../results/viewer ...]
     fmri-slides serve DECK [--port 8740] [--no-browser]      # local copy; E edits, Ctrl+S saves
     fmri-slides assets DECK                                  # refresh deck.js / editor.js / css / vendor
     fmri-slides bundle DECK --output DIR                     # offline copy (needs only Python 3)

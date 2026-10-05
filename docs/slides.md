@@ -11,7 +11,7 @@ On a local copy, the deck has an in-browser editor:
 - undo, and saving straight back into `index.html`.
 
 ```bash
-fmri-slides new talks/my-talk --title "My talk" --mount lebel=../../results/lebel_viewer
+fmri-slides new talks/my-talk --title "My talk" --mount viewer=../../results/viewer
 fmri-slides serve talks/my-talk          # http://127.0.0.1:8740/my-talk/ ; E edits, Ctrl+S saves
 fmri-slides bundle talks/my-talk --output D:/my-talk-offline   # runs anywhere with Python 3
 ```
@@ -32,6 +32,7 @@ my-talk/
   index.html     the slides, between <!--SLIDES--> and <!--/SLIDES-->
   deck.json      the deck's URL name, where it is published, the folders it embeds
   deck.js        navigation, steps and animations, embeds, brain views, KaTeX, charts
+  charts.js      the deck's own interactive charts (window.DeckCharts); not refreshed by `assets`
   editor.js      the slide sorter and the editor
   deck.css
   vendor/        KaTeX and NiiVue, so the deck works offline
@@ -46,7 +47,7 @@ my-talk/
  "title": "My talk",
  "public_base": "https://example.org/~me/",
  "mounts": {
-  "lebel": "../../results/lebel_viewer",
+  "viewer": "../../results/viewer",
   "reader/audio": "../../results/reader_audio",
   "reader": "../../results/reader_site"
  }
@@ -135,14 +136,14 @@ the same markup.
 | `data-hide="m"` | gone from step m on |
 | `.title-slide`, `.cols`, `.cols.three`, `.note`, `.figure` | layouts and styles in `deck.css` |
 | `.embed data-src="../reader/#..."` | an embedded page, loaded when its slide is near (`data-label` names it in the slide list) |
-| `.chart data-chart="name"` | an interactive chart drawn by a function in `deck.js`'s `charts` table |
+| `.chart data-chart="name"` | an interactive chart: the deck's own `charts.js` registers `window.DeckCharts.name = function (element) {...}` |
 
 ## Brain Views
 
 ```html
 <div class="embed brain"
-     data-src="../lebel/#r=tom_ablation&amp;e=A_rate&amp;f=english1000&amp;vr=r&amp;s=group&amp;v=multi"
-     data-pick="feature: english1000=English1000, bert_wordctx10=BERT"
+     data-src="../viewer/#r=my_report&amp;e=my_endpoint&amp;f=bert&amp;s=group&amp;v=multi"
+     data-pick="feature: english1000=English1000, bert=BERT"
      data-tour="data/clusters.json"></div>
 ```
 
@@ -168,10 +169,10 @@ cluster on the medial wall shows its hemisphere alone. The file is JSON:
 
 ```json
 {"n_clusters": 26, "mode": "fwe", "level": 0.05, "k": 20, "start_mm": [28, 22, 24],
- "start_link": "https://.../lebel/#...",
+ "start_link": "https://.../viewer/#...",
  "clusters": [{"size": 788, "volume_mm3": 6303, "centre_mm": [-32, -74, 38], "peak_value": 0.051,
                "region": "Lateral Occipital Cortex, superior division", "region_share": 0.94,
-               "link": "https://.../lebel/#...&x=-32_-74_38",
+               "link": "https://.../viewer/#...&x=-32_-74_38",
                "fsaverage": {"hemisphere": "lh", "vertex": 61641, "outward": [-0.05, -0.95, 0.31]}}]}
 ```
 

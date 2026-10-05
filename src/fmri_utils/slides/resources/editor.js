@@ -1,4 +1,4 @@
-// Slide sorter and slide editor for the lab-meeting deck, on top of deck.js (window.Deck).
+// Slide sorter and slide editor for fmri_utils.slides decks, on top of deck.js (window.Deck).
 //
 // Slide sorter (left, whenever the deck is not full screen): thumbnails of every slide; click to go
 // there. On the local copy (served by serve_talk.py) it also edits the deck: drag to reorder,

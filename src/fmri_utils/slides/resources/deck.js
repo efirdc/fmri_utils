@@ -1,8 +1,8 @@
-// Lab-meeting deck. Slides are <section class="slide"> in index.html; this file adds:
+// A slide deck (fmri_utils.slides). Slides are <section class="slide"> in index.html; this file adds:
 // - steps: [data-step="n"] elements appear at sub-step n; a slide's last step is its largest n;
 // - the slide.substep counter (bottom right; type a number there to jump) and #/slide/step links;
 // - embedded pages (.embed[data-src]) loaded when their slide is near, each with a link to the full page;
-// - brain views (.embed.brain): the LeBel viewer reduced to its brain, with deck buttons for
+// - brain views (.embed.brain): an fmri_utils viewer reduced to its brain, with deck buttons for
 //   volume/surface, the slice view and the surface geometry, plus any data-pick choices
 //   (features, or a variant control's options);
 // - cluster lists (.embed.brain[data-tour]): a side panel to move through a map's clusters, which
@@ -147,7 +147,7 @@
   counter.addEventListener("blur", () => { counter.value = label(); });
 
   // ---- embedded pages ---------------------------------------------------------------------
-  // data-src is relative to the deck ("../lebel/#..."); the link out goes to the same page where
+  // data-src is relative to the deck ("../viewer/#..."); the link out goes to the same page where
   // the deck is published.
   function publicUrl(src) {
     const m = /^\.\.\/([^/#]+)\/?(.*)$/.exec(src);
@@ -538,61 +538,9 @@
     });
   }
 
-  const charts = {
-    // The share of feature variance each ToM-ablation null removes, relative to ToM itself.
-    "null-variance": function (el) {
-      fetch("data/null_variance.json").then(r => r.json()).then(data => {
-        const families = [["lanczos", "Lanczos sum features"], ["hann", "Hann mean features"]];
-        const nulls = ["variance-matched", "TR shifts", "story permutations", "rating shifts"];
-        const features = [["english1000", "English1000", "#6aa7f0"], ["bert_wordctx10", "BERT", "#f0a15e"], ["gpt2xl_l24_wordctx10", "GPT-2 XL", "#3ec58f"]];
-        const W = 1000, H = 520, L = 190, R = 20, T = 30, B = 70, gap = 40;
-        const panel = (W - L - R - gap) / 2;
-        const NS = "http://www.w3.org/2000/svg";
-        const svg = document.createElementNS(NS, "svg");
-        svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
-        const tip = document.createElement("div");
-        tip.className = "tip"; tip.hidden = true;
-        const add = (tag, attrs, text) => { const n = document.createElementNS(NS, tag); Object.entries(attrs).forEach(([k, v]) => n.setAttribute(k, v)); if (text != null) n.textContent = text; svg.append(n); return n; };
-        const rowY = k => T + (k + 0.5) * (H - T - B) / nulls.length;
-        nulls.forEach((name, k) => add("text", { x: L - 14, y: rowY(k) + 6, "text-anchor": "end", "font-size": 20 }, name));
-        families.forEach(([family, title], f) => {
-          const x0 = L + f * (panel + gap);
-          const x = v => x0 + (Math.max(-0.05, Math.min(1.15, v)) + 0.05) / 1.2 * panel;
-          add("rect", { x: x(0.9), y: T, width: x(1.1) - x(0.9), height: H - T - B, fill: "rgba(106,167,240,0.15)" });
-          add("line", { x1: x(1), x2: x(1), y1: T, y2: H - B, stroke: "#e8ebf0", "stroke-width": 2 });
-          add("text", { x: x(1), y: T - 8, "text-anchor": "middle", "font-size": 18, fill: "#e8ebf0" }, "ToM");
-          [0, 0.25, 0.5, 0.75, 1].forEach(v => {
-            add("line", { x1: x(v), x2: x(v), y1: H - B, y2: H - B + 6, stroke: "#9aa4b2" });
-            add("text", { x: x(v), y: H - B + 26, "text-anchor": "middle", "font-size": 17 }, v);
-          });
-          add("text", { x: x0 + panel / 2, y: H - 12, "text-anchor": "middle", "font-size": 18 }, `${title}: variance removed ÷ ToM's`);
-          nulls.forEach((name, k) => {
-            features.forEach(([feature, label, colour], j) => {
-              const entry = ((data.families[family] || {})[name] || {})[feature];
-              if (!entry) return;
-              const y0 = rowY(k) + (j - 1) * 18;
-              entry.values.forEach((v, i) => {
-                const dot = add("circle", { cx: x(v), cy: y0 + ((i * 7919) % 13 - 6), r: entry.values.length > 50 ? 2.5 : 5,
-                                            fill: colour, "fill-opacity": entry.values.length > 50 ? 0.35 : 0.9 });
-                dot.addEventListener("mousemove", ev => {
-                  tip.hidden = false;
-                  tip.innerHTML = `<b>${name}</b> · ${label}<br>this draw: ${v.toFixed(3)} × ToM<br>median ${entry.median} × ToM (${entry.n} draws)<br>ToM removes ${entry.tom_percent}% of ${label}'s variance`;
-                  const box = el.getBoundingClientRect();
-                  tip.style.left = `${ev.clientX - box.left + 12}px`; tip.style.top = `${ev.clientY - box.top + 12}px`;
-                });
-                dot.addEventListener("mouseleave", () => { tip.hidden = true; });
-              });
-            });
-          });
-        });
-        features.forEach(([, label, colour], j) => {
-          add("circle", { cx: 20 + j * 150, cy: 12, r: 6, fill: colour });
-          add("text", { x: 32 + j * 150, y: 18, "font-size": 17 }, label);
-        });
-        el.replaceChildren(svg, tip);
-      });
-    },
-  };
+  // Charts are registered by the deck itself: a charts.js loaded before deck.js sets
+  // window.DeckCharts = { name: function (element) { ... } }, drawn into each [data-chart="name"].
+  const charts = window.DeckCharts || {};
   function renderCharts(root) {
     root.querySelectorAll("[data-chart]").forEach(el => { if (charts[el.dataset.chart]) charts[el.dataset.chart](el); });
   }

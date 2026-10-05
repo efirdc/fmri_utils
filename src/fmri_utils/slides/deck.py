@@ -9,6 +9,12 @@ from importlib import resources
 from pathlib import Path
 
 ASSETS = ("deck.js", "editor.js", "deck.css")
+# A deck's own charts (not an asset: "assets" never overwrites it).
+CHARTS_STUB = """// This deck's interactive charts: deck.js draws window.DeckCharts[name](element) into each
+// <div class="chart" data-chart="name">.
+window.DeckCharts = Object.assign(window.DeckCharts || {}, {
+});
+"""
 
 
 def resource_root() -> Path:
@@ -42,4 +48,5 @@ def new_deck(deck: Path, name: str | None = None, title: str = "Untitled talk", 
         {"name": name, "title": title, "public_base": public_base, "mounts": mounts or {}}, indent=1), encoding="utf-8")
     for folder in ("data", "figures"):
         (deck / folder).mkdir(exist_ok=True)
+    (deck / "charts.js").write_text(CHARTS_STUB, encoding="utf-8")
     return deck

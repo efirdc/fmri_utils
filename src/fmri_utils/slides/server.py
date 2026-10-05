@@ -7,14 +7,14 @@ folder and the sibling folders its embeds refer to as ``../<mount>/``::
 
     {"name": "talk-2026-10-06",
      "public_base": "https://example.org/~me/",
-     "mounts": {"lebel": "../../results/lebel_viewer",
-                "tom-ratings/audio": "../../results/reader_audio",
-                "tom-ratings": "../../results/reader_site"}}
+     "mounts": {"viewer": "../../results/viewer",
+                "reader/audio": "../../results/reader_audio",
+                "reader": "../../results/reader_site"}}
 
 The server mounts them side by side, as they sit when published::
 
     /talk-2026-10-06/   the deck
-    /lebel/             the mounted folder
+    /viewer/            the mounted folder
     ...
 
 so embedded pages are same-origin and the deck can drive them. It also makes a
