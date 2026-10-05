@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: fmri-utils
-Version: 0.6.0
+Version: 0.7.0
 Summary: Reusable fMRI utilities for encoding, group analysis, registration QC, montages, transforms, and decoding.
 Classifier: Programming Language :: Python :: 3
 Classifier: Programming Language :: Python :: 3 :: Only
@@ -25,6 +25,12 @@ Requires-Dist: templateflow
 Provides-Extra: ratings
 Requires-Dist: anthropic>=1.0; extra == "ratings"
 Requires-Dist: openai>=2.0; extra == "ratings"
+Provides-Extra: lebel
+Requires-Dist: h5py; extra == "lebel"
+Requires-Dist: fslpy; extra == "lebel"
+Provides-Extra: features
+Requires-Dist: torch; extra == "features"
+Requires-Dist: transformers; extra == "features"
 
 # fmri_utils
 
@@ -35,6 +41,10 @@ Reusable fMRI utilities for:
 - fMRIPrep-based transforms
 - montage rendering
 - decoding/searchlight helpers
+- static web viewers for brain maps: volumes, surfaces, regions and registration checks
+- LLM ratings of stories, and text features (language models) on a scanner clock
+- the LeBel et al. (2023) pipeline: stimulus and cross-participant encoding, and rating ablations
+- web slide decks that embed the viewers, with an in-browser editor
 
 ## Quick Start
 
@@ -71,6 +81,11 @@ Direct links:
 - [Chunked Encoding And Stitching](docs/encoding_chunked.md)
 - [Encoding Output Reference](docs/encoding_outputs.md)
 - [Temporal Continuous Decoding](docs/temporal_decoding.md)
+- [Result Viewer](docs/viewer.md)
+- [Story Ratings](docs/story_ratings.md)
+- [Text Features](docs/features.md)
+- [LeBel 2023: Encoding Models And Rating Ablations](docs/lebel2023.md)
+- [Slide Decks](docs/slides.md)
 
 ## Example Outputs
 

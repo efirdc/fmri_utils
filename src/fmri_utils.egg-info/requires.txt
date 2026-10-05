@@ -11,6 +11,14 @@ fire
 Pillow
 templateflow
 
+[features]
+torch
+transformers
+
+[lebel]
+h5py
+fslpy
+
 [ratings]
 anthropic>=1.0
 openai>=2.0
