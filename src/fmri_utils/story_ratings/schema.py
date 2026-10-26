@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Mapping, Sequence
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from .config import RatingSpec
 
@@ -43,6 +43,8 @@ def build_schema(spec: RatingSpec, *, compact: bool = False, bounded_integers: b
         return {"type": "integer", "enum": list(range(minimum, maximum + 1))}
 
     properties: Dict[str, Any] = {name_of("index"): {"type": "integer"}}
+    if spec.include_reason and spec.reason_first:
+        properties[name_of("reason")] = {"type": "string"}
     properties[name_of(spec.scale.name)] = integer(spec.scale.minimum, spec.scale.maximum)
     for flag in spec.flags:
         properties[name_of(flag)] = integer(0, 1)
@@ -50,7 +52,7 @@ def build_schema(spec: RatingSpec, *, compact: bool = False, bounded_integers: b
         properties[name_of(categorical)] = {"type": "string", "enum": list(choices)}
     if spec.include_confidence:
         properties[name_of("confidence")] = integer(1, 3)
-    if spec.include_reason:
+    if spec.include_reason and not spec.reason_first:
         properties[name_of("reason")] = {"type": "string"}
 
     item = {
@@ -99,7 +101,14 @@ def validate_ratings(payload: Mapping[str, Any], n_items: int, spec: RatingSpec)
     return ordered
 
 
-def build_prompt(template: str, texts: Sequence[str], placeholder: str = "{utterances}") -> str:
-    """Insert numbered segments into the rubric."""
-    lines = "\n".join(f"{index:03d} | {text}" for index, text in enumerate(texts))
+def build_prompt(template: str, texts: Sequence[str], placeholder: str = "{utterances}",
+                 story: Optional[Sequence[str]] = None, offset: int = 0) -> str:
+    """Insert numbered segments into the rubric.
+
+    With ``story`` (every segment of the story) and a ``{story}`` placeholder in the rubric, the whole
+    story goes in as context and the segments to rate keep their story numbers (``offset`` onwards), so
+    a long story can be rated in batches without losing what came before."""
+    if story is not None and "{story}" in template:
+        template = template.replace("{story}", "\n".join(f"{i:03d} | {t}" for i, t in enumerate(story)))
+    lines = "\n".join(f"{offset + index:03d} | {text}" for index, text in enumerate(texts))
     return template.replace(placeholder, lines)

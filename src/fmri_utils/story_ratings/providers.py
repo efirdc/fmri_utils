@@ -218,7 +218,9 @@ def call_claude_cli(prompt: str, schema: Mapping[str, Any], config: ProviderConf
 
     environment = {
         key: value for key, value in os.environ.items()
-        if key not in {"CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "MAX_THINKING_TOKENS"}
+        # An ANTHROPIC_API_KEY in the environment would make the CLI bill the API instead of the
+        # subscription this backend exists for.
+        if key not in {"CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "MAX_THINKING_TOKENS", "ANTHROPIC_API_KEY"}
     }
     if not config.thinking:
         environment["MAX_THINKING_TOKENS"] = "0"
@@ -243,7 +245,8 @@ def call_claude_cli(prompt: str, schema: Mapping[str, Any], config: ProviderConf
         raise RuntimeError("claude returned no structured_output")
     usage = wrapper.get("usage") or {}
     return payload, Usage(
-        input_tokens=usage.get("input_tokens", 0),
+        # The CLI caches the prompt, so most input arrives as cache-creation tokens; they are input too.
+        input_tokens=(usage.get("input_tokens", 0) or 0) + (usage.get("cache_creation_input_tokens", 0) or 0),
         output_tokens=usage.get("output_tokens", 0),
         cached_input_tokens=usage.get("cache_read_input_tokens", 0) or 0,
         duration_ms=duration_ms,

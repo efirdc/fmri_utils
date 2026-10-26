@@ -40,6 +40,7 @@ def load_spec(path: Optional[Path]) -> RatingSpec:
         categoricals={name: tuple(choices) for name, choices in payload.get("categoricals", {}).items()},
         include_confidence=bool(payload.get("include_confidence", True)),
         include_reason=bool(payload.get("include_reason", True)),
+        reason_first=bool(payload.get("reason_first", False)),
     )
 
 

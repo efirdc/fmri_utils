@@ -71,15 +71,22 @@ def rate_segments(
     size = provider.chunk_size or len(texts)
     ratings: List[Dict[str, Any]] = []
     total = Usage(calls=0)
+    # A rubric with {story} gets the whole story as context in every batch; the batch keeps story numbers.
+    in_context = "{story}" in config.prompt_template
     for start in range(0, len(texts), size):
         chunk = list(texts[start : start + size])
-        prompt = build_prompt(config.prompt_template, chunk, config.utterance_placeholder)
+        prompt = build_prompt(config.prompt_template, chunk, config.utterance_placeholder,
+                              story=texts if in_context else None, offset=start if in_context else 0)
         last_error: Optional[Exception] = None
         for attempt in range(1, provider.max_attempts + 1):
             payload, usage = call_model(prompt, schema, provider)
             total = total + usage
             if provider.compact_schema:
                 payload = expand_compact(payload, config.spec)
+            if in_context and isinstance(payload.get("ratings"), list):
+                # The reply uses story numbers; validate and store relative to the batch.
+                payload = {**payload, "ratings": [{**item, "index": int(item["index"]) - start}
+                                                  for item in payload["ratings"] if isinstance(item, dict) and "index" in item]}
             try:
                 ordered = validate_ratings(payload, len(chunk), config.spec)
             except ValueError as error:

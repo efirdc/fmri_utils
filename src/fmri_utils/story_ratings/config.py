@@ -43,6 +43,9 @@ class RatingSpec:
     categoricals: Mapping[str, Tuple[str, ...]] = field(default_factory=dict)
     include_confidence: bool = True
     include_reason: bool = True
+    # Ask for the reason before the rating, so the rating follows from a stated cue rather than
+    # the reason justifying a rating already given (structured output writes fields in order).
+    reason_first: bool = False
 
     def validate(self) -> None:
         self.scale.validate()
@@ -66,7 +69,10 @@ class RatingSpec:
         if self.include_confidence:
             names.append("confidence")
         if self.include_reason:
-            names.append("reason")
+            if self.reason_first:
+                names.insert(1, "reason")
+            else:
+                names.append("reason")
         return tuple(names)
 
 
