@@ -155,7 +155,12 @@ family-wise corrected *p* (a permutation max-*t*, say). It adds an **FWE <**
 mode, shown only for maps that have it. A permutation analysis can then be one
 map, the observed statistic, with *p*, *q* and FWE thresholds and **Cluster ≥**
 for extent, instead of a fixed map for each correction.
-`significance_defaults={"p": 0.005}` sets the level a mode opens at. In *p*< or *q*< mode the map keeps its own colours (the effect, not
+`significance_defaults={"p": 0.005}` sets the level a mode opens at.
+`significance_resolution={"p": 1001, "fwe": 1001}` says the values are discrete
+(an empirical *p* from 1,000 nulls is k/1001; sign-flip FWE over 8 subjects is
+k/256): the threshold then snaps to the largest attainable level at or below
+the one asked for, the readout shows it as a fraction (`p ≤ 1/1001`), the arrows
+step one level, and a level below the floor says nothing can pass. In *p*< or *q*< mode the map keeps its own colours (the effect, not
 the statistic) and is shown only where the companion clears the level; the
 readout says `p<0.05 · TFCE FWE`. Until the companion has loaded, the map is
 held back rather than shown uncorrected. On a surface the companion is sampled
@@ -967,7 +972,8 @@ pipeline can write that file directly and skip this module; this is the shape.
         "subject": "sub-01", "feature": "",
         "variant": "",              // optional; empty = shown under every variant
         "path": "data/loc/t_motion/map_sub-01.nii.gz",   // float32
-        "significance": { "p": "…_neglog10p.nii.gz", "q": "…", "label": "TFCE FWE" },  // optional
+        "significance": { "p": "…_neglog10p.nii.gz", "q": "…", "label": "TFCE FWE",
+                          "resolution": { "p": 1001 } },  // optional; resolution: discrete k/N levels
         "region_rows": [{ "name": "Angular Gyrus", "delta": 0.0068, "value": 3.4,
                           "t": 8.0, "p": 9e-5, "q": 4e-4, "significant": true,
                           "n_positive": 8, "n": 8 }],   // optional; region endpoints

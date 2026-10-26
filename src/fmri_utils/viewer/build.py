@@ -357,6 +357,8 @@ def _build_endpoint(
                 significance["label"] = entry.significance_label
             if entry.significance_defaults:
                 significance["defaults"] = {k: float(v) for k, v in entry.significance_defaults.items()}
+            if entry.significance_resolution:
+                significance["resolution"] = {k: int(v) for k, v in entry.significance_resolution.items()}
             record["significance"] = significance
         curves = None if anatomy else _curves(endpoint, entry, values)
         if curves:

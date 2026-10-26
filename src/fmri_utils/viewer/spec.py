@@ -59,11 +59,15 @@ class MapEntry:
     # have that companion. ``significance_label`` names the test in the
     # threshold readout ("TFCE FWE"); ``significance_defaults`` sets the level
     # a mode opens at, e.g. {"p": 0.005} for an uncorrected permutation p.
+    # ``significance_resolution`` says a mode's values are discrete, k/N: an
+    # empirical p from 1,000 nulls is {"p": 1001}, sign-flip FWE over 8
+    # subjects {"fwe": 256}. The page then thresholds only at those levels.
     significance_p: Path | None = None
     significance_q: Path | None = None
     significance_fwe: Path | None = None
     significance_label: str = ""
     significance_defaults: Mapping[str, float] = field(default_factory=dict)
+    significance_resolution: Mapping[str, int] = field(default_factory=dict)
     # The image drawn under this map instead of the template (or the
     # subject's anatomy in subject space): a registration check shows a
     # boldref under a resampled T1, in a space no other map is in.
@@ -535,6 +539,10 @@ class ViewerSpec:
                     if unknown:
                         raise ValueError(f"{report.id}/{endpoint.id}: significance_defaults "
                                          f"names {sorted(unknown)}; modes are p, q and fwe")
+                    for mode, steps in entry.significance_resolution.items():
+                        if mode not in {"p", "q", "fwe"} or int(steps) < 2:
+                            raise ValueError(f"{report.id}/{endpoint.id}: significance_resolution "
+                                             f"{mode}={steps}; modes are p, q and fwe, steps at least 2")
                     if entry.variant and entry.variant not in variant_ids:
                         raise ValueError(f"{report.id}/{endpoint.id}: map variant "
                                          f"{entry.variant!r} is not one of the endpoint's variants")
