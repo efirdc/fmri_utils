@@ -276,7 +276,10 @@
   /* Region outlines and their labels are drawn over the scene rather than
      into it, so they stay crisp lines at any zoom and never mix with the
      statistical colours the way painted vertices did. */
-  #annotations { position: absolute; inset: 0; pointer-events: none; z-index: 3; }
+  /* A canvas keeps its pixel size unless told otherwise, and its pixels are the stage times
+     devicePixelRatio: without these it shows 1.25-1.5x too big on a scaled display and every label
+     lands that factor away from the surface. */
+  #annotations { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 3; }
   /* The surface has its own WebGL context: NiiVue's mesh pipeline carries no
      texture coordinates, and region outlines drawn any other way are stuck at
      the resolution of the mesh. */
@@ -1106,9 +1109,16 @@
   // subject's anat mm.
   var coordCache = boundedCache(6);
 
+  // Set from the manifest's data_version before anything loads; empty means plain paths.
+  var DATA_VERSION = "";
+  function versioned(path) {
+    if (!DATA_VERSION) return path;
+    return path + (path.indexOf("?") < 0 ? "?" : "&") + "v=" + encodeURIComponent(DATA_VERSION);
+  }
+
   function loadCoordField(spec) {
     return coordCache.get(spec.path, function () {
-      return fetch(spec.path).then(function (response) {
+      return fetch(versioned(spec.path)).then(function (response) {
         return response.arrayBuffer();
       }).then(function (buffer) {
       var dims = spec.dims;
@@ -1238,6 +1248,27 @@
     var sig = entry && entry.significance;
     if (mode !== "value" && sig && sig[mode]) {
       var level = Math.max(Math.min(requested, 1), 1e-12);
+      var steps = sig.resolution && sig.resolution[mode];
+      if (steps) {
+        // An empirical p (or FWE) from N nulls takes only the values k/(N+1), so a level in between keeps
+        // exactly the voxels of the attainable level below it. The cutoff is that level, shown as k/(N+1).
+        // The slack lets a level typed or snapped to a few digits (0.04995 for 50/1001) keep its own k.
+        var k = Math.floor(level * steps + 1e-4);
+        var name = mode === "fwe" ? "FWE" : mode;
+        if (k < 1) {
+          return { floor: 0, sigMode: mode, sigFloor: Infinity,
+                   label: name + "<" + requested + ": below the smallest possible value, 1/" + steps,
+                   tip: "With " + (steps - 1).toLocaleString("en-US") + " nulls, " + name + " cannot be smaller than 1/" + steps + "." };
+        }
+        var exact = k / steps;
+        return {
+          // A hair below the stored -log10 so a voxel exactly at k/(N+1) passes despite float rounding.
+          floor: 0, sigMode: mode, sigFloor: -Math.log(exact) / Math.LN10 - 1e-6,
+          label: name + " ≤ " + k + "/" + steps + " (" + Number(exact.toPrecision(3)) + ")" + (sig.label ? " · " + sig.label : ""),
+          tip: "Exact: with " + (steps - 1).toLocaleString("en-US") + " nulls " + name + " takes only the values k/" + steps +
+            ", so the threshold is the attainable level " + k + "/" + steps + ", the largest at or below " + requested + "."
+        };
+      }
       return {
         floor: 0, sigMode: mode, sigFloor: -Math.log(level) / Math.LN10,
         label: (mode === "fwe" ? "FWE" : mode) + "<" + requested + (sig.label ? " · " + sig.label : ""),
@@ -1276,7 +1307,28 @@
 
   function retuneStep(input) {
     var value = parseFloat(input.value);
-    input.step = adaptiveStep(value);
+    var steps = input === el["threshold-input"] ? thresholdSteps() : null;
+    // With a discrete p (k/(N+1)) the arrows move one attainable level at a time.
+    input.step = steps ? String(1 / steps) : adaptiveStep(value);
+  }
+
+  // The resolution of the shown map's p (or FWE) in the current threshold mode: N+1 for an empirical value
+  // from N nulls, null for a continuous one.
+  function thresholdSteps() {
+    var shown = state.endpoint ? styleEntry() : null;
+    var sig = shown && shown.significance;
+    var mode = state.thresholdMode;
+    return mode !== "value" && sig && sig[mode] && sig.resolution && sig.resolution[mode] ? sig.resolution[mode] : null;
+  }
+
+  // On commit, a typed level is replaced by the attainable level the map uses.
+  function snapThresholdInput() {
+    var steps = thresholdSteps();
+    if (!steps) return;
+    var value = parseFloat(el["threshold-input"].value);
+    if (!isFinite(value) || value <= 0) return;
+    var k = Math.max(1, Math.floor(Math.min(value, 1) * steps + 1e-4));
+    el["threshold-input"].value = Number((k / steps).toPrecision(8));
   }
 
   function sliderCeiling() {
@@ -4033,7 +4085,7 @@
   function loadImage(path) {
     return imageCache.get(path, function () {
       return NVImage.loadFromUrl({
-        url: path, name: path.split("/").pop(), trustCalMinMax: false
+        url: versioned(path), name: path.split("/").pop(), trustCalMinMax: false
       });
     }).then(function (image) {
       try { return image.clone(); } catch (ignored) { return image; }
@@ -4057,7 +4109,7 @@
       warming += 1;
       imageCache.get(path, function () {
         return NVImage.loadFromUrl({
-          url: path, name: path.split("/").pop(), trustCalMinMax: false
+          url: versioned(path), name: path.split("/").pop(), trustCalMinMax: false
         });
       }).then(function () {
         warming -= 1; warmNext(token);
@@ -4271,7 +4323,7 @@
   function loadAtlasVolume(path) {
     return atlasCache.get(path, function () {
       return NVImage.loadFromUrl({
-        url: path, name: path.split("/").pop(), trustCalMinMax: false
+        url: versioned(path), name: path.split("/").pop(), trustCalMinMax: false
       }).then(function (image) {
         var grid = compactLabels(image);
         atlasLoaded[path] = { image: grid, sample: volumeSampler(grid) };
@@ -5029,7 +5081,7 @@
   var faceCache = boundedCache(8);
   function loadFaces(url) {
     return faceCache.get(url, function () {
-      return fetch(url).then(function (response) {
+      return fetch(versioned(url)).then(function (response) {
         if (!response.ok) throw new Error(url + " → " + response.status);
         return response.arrayBuffer();
       }).then(function (buffer) {
@@ -5042,7 +5094,7 @@
 
   function fetchBinary(path) {
     return binaryCache.get(path, function () {
-      return fetch(path).then(function (response) {
+      return fetch(versioned(path)).then(function (response) {
         if (!response.ok) throw new Error(path + " → " + response.status);
         return response.arrayBuffer();
       });
@@ -7581,6 +7633,10 @@
   }
 
   function finishSurface(record, showing) {
+    // A region test entered in volume mode found no surface to switch to its
+    // parcellation; the surface it gets now does.
+    var testing = regionStash ? currentRegionStats(state.endpoint) : null;
+    if (testing && record && (record.parcellations || {})[testing.atlas]) state.surfaceAtlas = testing.atlas;
     applyPendingWindow();
     applyTemplateMix();
     maskSurfaceValues(thresholdFor(styleEntry()));
@@ -9542,6 +9598,11 @@
       retuneStep(el["threshold-input"]);
       refreshStyle();
     });
+    el["threshold-input"].addEventListener("change", function () {
+      snapThresholdInput();
+      retuneStep(el["threshold-input"]);
+      refreshStyle();
+    });
     el["window-max"].addEventListener("input", function () {
       retuneStep(el["window-max"]);
       refreshStyle();
@@ -10269,7 +10330,12 @@
     });
   }
 
-  fetch("manifest.json").then(function (r) { return r.json(); }).then(start)
+  // The manifest is always revalidated; its data_version (stamped at each deploy) is appended to every data
+  // URL, so a redeployed map is never read from a stale browser cache while unchanged deploys still cache.
+  fetch("manifest.json", { cache: "no-cache" }).then(function (r) { return r.json(); }).then(function (m) {
+    DATA_VERSION = m && m.data_version ? String(m.data_version) : "";
+    return start(m);
+  })
     .catch(function (error) {
       el.loading.textContent = "could not read manifest.json — " + error.message;
     });
