@@ -122,9 +122,34 @@ def harvard_oxford(fsldir_or_folder: Path) -> dict[str, tuple[np.ndarray, dict[i
     return out
 
 
+def against_group_nulls(group: np.ndarray, group_null: np.ndarray) -> dict[str, np.ndarray]:
+    """A group map (voxels) against group nulls (nulls x voxels): net, z, one-sided p, BH q, family-wise p.
+
+    Each null is standardised by the voxels' null mean and sd. The family-wise p compares a voxel's z with
+    every null's largest z over the brain. The one-sided p is each voxel's own empirical p,
+    (1 + nulls at least as large) / (n_nulls + 1): it takes only the values k / (n_nulls + 1), so read it
+    uncorrected at those levels (BH over a brain rarely passes with 1,000 nulls). Nulls are not pooled over
+    voxels, which would assume every voxel's standardised nulls have the same shape."""
+    null_mean = group_null.mean(axis=0)
+    null_sd = group_null.std(axis=0)
+    z = (group - null_mean) / null_sd
+    n_nulls = group_null.shape[0]
+    standardised = (group_null - null_mean[None]) / null_sd[None]
+    max_z = standardised.max(axis=1)
+    del standardised
+    p = (1 + (group_null >= group[None]).sum(axis=0)) / (n_nulls + 1)
+    fwe = (1 + n_nulls - np.searchsorted(np.sort(max_z), z - 1e-9, side="left")) / (n_nulls + 1)
+    return {"mean": group, "net": group - null_mean, "z": z, "p": p, "q": bh_adjusted(p), "fwe": fwe}
+
+
 def null_draws(observed: dict[str, np.ndarray], nulls: dict[str, np.ndarray], warps: dict[str, ColumnMNIWarp],
-               n_draws: int = 10000, seed: int = 0) -> dict[str, np.ndarray]:
-    """observed[s]: a subject's drop over its columns; nulls[s]: nulls x columns. Group z, p, q, family-wise p."""
+               n_draws: int = 10000, seed: int = 0, paired: bool = False) -> dict[str, np.ndarray]:
+    """observed[s]: a subject's drop over its columns; nulls[s]: nulls x columns. Group z, p, q, family-wise p.
+
+    ``paired``: null k is the same direction in every subject (one directions file for all of them),
+    so group null k is direction k averaged over subjects, as the observed group mean averages the
+    same annotation: n_nulls group nulls, returned as ``group_null`` too. Otherwise each of ``n_draws``
+    draws picks one null per subject at random."""
     subjects = list(observed)
     on = {s: (warps[s].apply(observed[s]), warps[s].apply(nulls[s].T)) for s in subjects}
     common = None
@@ -138,6 +163,12 @@ def null_draws(observed: dict[str, np.ndarray], nulls: dict[str, np.ndarray], wa
         columns[s] = (on[s][0][position], np.ascontiguousarray(on[s][1][position].T))
     n, n_nulls = len(subjects), columns[subjects[0]][1].shape[0]
     group = np.mean([columns[s][0] for s in subjects], axis=0)
+    if paired:
+        group_null = np.zeros((n_nulls, voxels.size), dtype=np.float32)
+        for s in subjects:
+            group_null += columns[s][1]
+        group_null /= n
+        return {"voxels": voxels, **against_group_nulls(group, group_null), "group_null": group_null}
     null_mean = np.mean([columns[s][1].mean(axis=0) for s in subjects], axis=0)
     null_sd = np.sqrt(np.sum([columns[s][1].var(axis=0) for s in subjects], axis=0)) / n
     z = (group - null_mean) / null_sd
@@ -156,6 +187,25 @@ def null_draws(observed: dict[str, np.ndarray], nulls: dict[str, np.ndarray], wa
     p = (1 + exceed) / (n_draws + 1)
     fwe = (1 + n_draws - np.searchsorted(np.sort(max_z), z - 1e-9, side="left")) / (n_draws + 1)
     return {"voxels": voxels, "mean": group, "net": group - null_mean, "z": z, "p": p, "q": bh_adjusted(p), "fwe": fwe}
+
+
+def save_group_nulls(path: Path, voxels: np.ndarray, group_null: np.ndarray) -> Path:
+    """Group nulls (nulls x template voxels) as float16, with the voxels' flat template indices. A null drop
+    involves no annotation, so the file serves any annotation the null directions are variance-matched to."""
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(path, voxels=np.asarray(voxels, dtype=np.int64), shape=np.array(MNI_SHAPE),
+                        affine=MNI_AFFINE, null=np.asarray(group_null, dtype=np.float16))
+    return Path(path)
+
+
+def group_nulls_test(maps: dict[str, np.ndarray], warps: dict[str, ColumnMNIWarp], bank: Path) -> dict[str, np.ndarray]:
+    """Subjects' drop maps against saved group nulls, over the template voxels both cover."""
+    stack, voxels = to_template(maps, warps)
+    data = np.load(bank)
+    bank_voxels = data["voxels"]
+    shared, here, there = np.intersect1d(voxels, bank_voxels, return_indices=True)
+    group = stack.mean(axis=0)[here]
+    return {"voxels": shared, **against_group_nulls(group, data["null"][:, there].astype(np.float32))}
 
 
 def save_results(result: dict, voxels: np.ndarray, output: Path, prefix: str) -> list[Path]:
@@ -215,7 +265,7 @@ def _subject_maps(args, subjects, warps, with_nulls: bool):
 
 
 def main(argv=None) -> None:
-    """fmri-group-inference warp-matrix | voxel | summary | nulls"""
+    """fmri-group-inference warp-matrix | voxel | summary | nulls | group-nulls"""
     import argparse
     parser = argparse.ArgumentParser(prog="fmri-group-inference", description=__doc__.splitlines()[0],
                                      formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
@@ -250,10 +300,18 @@ def main(argv=None) -> None:
     inputs(p)
     p.add_argument("--top", type=float, default=5.0)
     p.add_argument("--output", type=Path, default=None, help="a JSON file")
-    p = sub.add_parser("nulls", help="group null draws (the variance-matched null)")
+    p = sub.add_parser("nulls", help="group test against the variance-matched null")
     inputs(p, nulls=True)
     p.add_argument("--warps", type=Path, required=True)
-    p.add_argument("--n-draws", type=int, default=10000)
+    p.add_argument("--paired", action="store_true", help="group null k = null direction k averaged over subjects")
+    p.add_argument("--save-group-nulls", type=Path, default=None, help="with --paired: write the group nulls (.npz)")
+    p.add_argument("--n-draws", type=int, default=10000, help="without --paired: random draws of one null per subject")
+    p.add_argument("--output", type=Path, required=True)
+    p.add_argument("--prefix", required=True)
+    p = sub.add_parser("group-nulls", help="group test against saved group nulls (nulls --paired --save-group-nulls)")
+    inputs(p)
+    p.add_argument("--warps", type=Path, required=True)
+    p.add_argument("--group-nulls", type=Path, required=True)
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--prefix", required=True)
     args = parser.parse_args(argv)
@@ -295,7 +353,12 @@ def main(argv=None) -> None:
         print(f"{voxels.size} voxels; max t {np.nanmax(result['t']):.2f}; q < 0.05: {(result['q'] < 0.05).sum()}; "
               f"FWE < 0.05: {(result['fwe'] < 0.05).sum()}", flush=True)
     else:
-        result = null_draws(maps, null_maps, warps, n_draws=args.n_draws)
+        if args.command == "group-nulls":
+            result = group_nulls_test(maps, warps, args.group_nulls)
+        else:
+            result = null_draws(maps, null_maps, warps, n_draws=args.n_draws, paired=args.paired)
+            if args.paired and args.save_group_nulls:
+                save_group_nulls(args.save_group_nulls, result["voxels"], result["group_null"])
         save_results(result, result["voxels"], args.output, args.prefix)
         print(f"max z {np.nanmax(result['z']):.2f}; q < 0.05: {(result['q'] < 0.05).sum()}; "
               f"FWE < 0.05: {(result['fwe'] < 0.05).sum()}", flush=True)

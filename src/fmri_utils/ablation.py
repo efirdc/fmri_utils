@@ -171,6 +171,40 @@ def select_directions(space: NullSpace, output: Path, n: int = 1000, tolerance: 
     return summary
 
 
+def check_directions(space: NullSpace, directions: Path, tolerance: float = 0.10, sample: int = 200, seed: int = 0) -> dict:
+    """Can null directions selected for one annotation serve another (``space``'s)?
+
+    A null drop r_full - r_null_k involves no annotation, so fitted nulls can be reused, provided:
+    - **variance:** the directions remove about the share of feature variance this annotation's removal
+      takes (they were accepted within a tolerance of their own annotation's share);
+    - **overlap:** the directions carry little of this annotation. They were orthogonalised on the
+      annotation they were selected for, not this one. Reported as the share of a direction's raw series
+      (fit runs) that this annotation's lags 0-4 explain, over a sample of directions.
+    """
+    data = np.load(directions)
+    w = data["w"]
+    fractions = np.asarray(data["fraction"], dtype=np.float64)
+    original = float(data["annotation_fraction"] if "annotation_fraction" in data.files else data["tom_fraction"])
+    f_annotation = space.removed(space.annotation)
+    ratio = float(np.median(fractions) / f_annotation)
+    lags = np.vstack([np.column_stack([lag_matrix(space.annotation[r]), np.ones(space.annotation[r].size)]) for r in space.fit])
+    rng = np.random.default_rng(seed)
+    overlap = []
+    for k in rng.choice(len(w), size=min(sample, len(w)), replace=False):
+        s = np.concatenate([(space.X[r] - space.mean) @ w[k].astype(np.float64) for r in space.fit])
+        s = s - s.mean()
+        fitted = lags @ least_squares(lags, s)
+        overlap.append(float(1 - ((s - fitted) ** 2).sum() / (s ** 2).sum()))
+    summary = {"annotation_fraction": f_annotation, "directions_fraction_median": float(np.median(fractions)),
+               "directions_fraction_range": [float(fractions.min()), float(fractions.max())],
+               "directions_selected_for_fraction": original, "ratio_directions_to_annotation": ratio,
+               "within_tolerance": bool(abs(ratio - 1) <= tolerance), "tolerance": tolerance,
+               "overlap_median": float(np.median(overlap)), "overlap_95th": float(np.percentile(overlap, 95)),
+               "directions_checked_for_overlap": len(overlap)}
+    print(json.dumps(summary, indent=1), flush=True)
+    return summary
+
+
 def score(d_obs: np.ndarray, d_null: np.ndarray) -> dict[str, np.ndarray]:
     """Per voxel against its null drops (nulls x voxels): net, z, one-sided empirical p."""
     mean, sd = d_null.mean(axis=0), d_null.std(axis=0, ddof=1)
@@ -231,12 +265,12 @@ def read_nulls(folder: Path, n_columns: int, n_nulls: int) -> np.ndarray:
 
 
 def main(argv=None) -> None:
-    """fmri-ablation remove | nulls-select | nulls-fit"""
+    """fmri-ablation remove | nulls-select | nulls-fit | nulls-check"""
     import argparse
     parser = argparse.ArgumentParser(prog="fmri-ablation",
                                      description="Ablate an annotation from a feature space; the variance-matched null.")
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("remove", "nulls-select", "nulls-fit"):
+    for name in ("remove", "nulls-select", "nulls-fit", "nulls-check"):
         p = sub.add_parser(name)
         p.add_argument("--feature-root", type=Path, required=True, help="holding <feature>/<run>.npy")
         p.add_argument("--feature", required=True)
@@ -260,6 +294,11 @@ def main(argv=None) -> None:
             p.add_argument("--n-chunks", type=int, default=5)
             p.add_argument("--start", type=int, default=0)
             p.add_argument("--stop", type=int, default=0)
+        if name == "nulls-check":
+            p.add_argument("--directions", type=Path, required=True, help="directions selected for another annotation")
+            p.add_argument("--tolerance", type=float, default=0.10)
+            p.add_argument("--sample", type=int, default=200, help="directions checked for overlap")
+            p.add_argument("--output", type=Path, default=None, help="a JSON file")
     args = parser.parse_args(argv)
     if args.command == "remove":
         build_removed_features(args.feature_root, args.feature, args.regressors, args.output_root, args.test_run, args.suffix)
@@ -267,6 +306,11 @@ def main(argv=None) -> None:
     space = NullSpace(args.feature_root, args.feature, args.regressors, args.test_run)
     if args.command == "nulls-select":
         select_directions(space, args.output, n=args.n, tolerance=args.tolerance, seed=args.seed)
+    elif args.command == "nulls-check":
+        summary = check_directions(space, args.directions, tolerance=args.tolerance, sample=args.sample)
+        if args.output:
+            Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+            Path(args.output).write_text(json.dumps(summary, indent=1), encoding="utf-8")
     else:
         from fmri_utils.encoding.run_table import RunTable
         fit_nulls(RunTable(args.run_table), args.subject, space, args.directions, args.output, args.chunk,

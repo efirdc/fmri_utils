@@ -124,6 +124,10 @@ class Ablation(unittest.TestCase):
             self.assertGreater(out["accepted"], 0)
             path = ablation.fit_nulls(table, "sub0", space, root / "nulls.npz", root / "nullfits", 0, 1, 0, 2)
             self.assertEqual(np.load(path)["correlation"].shape[0], min(2, out["accepted"]))
+            # The same directions checked against the annotation they were selected for: matched, little overlap.
+            check = ablation.check_directions(space, root / "nulls.npz", tolerance=0.9, sample=3)
+            self.assertTrue(check["within_tolerance"])
+            self.assertTrue(0 <= check["overlap_median"] < 0.5)
 
 
 class CrossParticipant(unittest.TestCase):
@@ -163,6 +167,23 @@ class GroupInference(unittest.TestCase):
         full = np.linspace(0, 1, 100)
         summary = group_inference.top_voxel_summary(full, full - 0.1)
         self.assertAlmostEqual(summary["top_mean_delta_r"], 0.1, places=6)
+
+    def test_paired_nulls_and_saved_group_nulls(self):
+        rng = np.random.default_rng(3)
+        cols = np.array([[k, -1, -1, -1, -1, -1, -1, -1] for k in range(5)])
+        weights = np.array([[1.0, 0, 0, 0, 0, 0, 0, 0]] * 5, dtype=np.float32)
+        warps = {s: ColumnMNIWarp(np.arange(5), cols, weights, np.arange(5), 5) for s in ("a", "b", "c")}
+        observed = {s: np.array([0.5, 0, 0, 0, 0]) + 0.01 * rng.normal(size=5) for s in warps}
+        nulls = {s: 0.01 * rng.normal(size=(50, 5)) for s in warps}
+        result = group_inference.null_draws(observed, nulls, warps, paired=True)
+        expected = np.mean([nulls[s] for s in warps], axis=0)
+        np.testing.assert_allclose(result["group_null"], expected, atol=1e-6)
+        self.assertAlmostEqual(float(result["fwe"][0]), 1 / 51, places=6)
+        self.assertGreater(float(result["fwe"][1:].min()), 0.05)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = group_inference.save_group_nulls(Path(tmp) / "g.npz", result["voxels"], result["group_null"])
+            again = group_inference.group_nulls_test(observed, warps, path)
+            np.testing.assert_allclose(again["z"], result["z"], rtol=1e-2)
 
     def test_warp_apply(self):
         cols = np.array([[0, 1, -1, -1, -1, -1, -1, -1], [2, -1, -1, -1, -1, -1, -1, -1]])

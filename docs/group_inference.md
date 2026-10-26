@@ -38,7 +38,9 @@ anatomy (`atlas_to_anatomical`), and exports a pycortex transform
 | `voxel` | one-sample t over subjects at each voxel, two-sided p, Benjamini-Hochberg q, and a family-wise p from the maximum \|t\| over all 2^n sign flips |
 | `voxel` with `--fsldir` / `--atlas` | region tests: each subject's mean within each region, t over subjects, BH over regions |
 | `summary` | per subject, over its best-predicted 5% of voxels: mean r, mean Δr, Δr as a share of r |
-| `nulls` | with a variance-matched null: the group mean drop against draws of one null per subject |
+| `nulls --paired` | with a variance-matched null: the group mean drop against group nulls, null direction k averaged over subjects |
+| `nulls` | the same against random draws of one null per subject (unpaired) |
+| `group-nulls` | the group mean drop against saved group nulls (`nulls --paired --save-group-nulls`) |
 
 Some notes on reading them:
 - **Sign flips with 8 subjects:** there are only 256 sign patterns, so the
@@ -46,9 +48,25 @@ Some notes on reading them:
 - **Region tests** ask fewer questions than voxels, which is where a small group
   has power. `--fsldir` points at FSL's `data/atlases` (or a copy) for
   Harvard-Oxford. `--atlas NAME=IMAGE:NAMES_JSON` adds any template label image.
-- **Null draws:** 10,000 draws give z, one-sided p, BH q, and a family-wise p
-  from each draw's largest z. This is a fixed-effects test: it asks whether
-  these subjects' drops beat the null, not whether new subjects' would.
+- **The null test** standardises the group mean at each voxel by the group
+  nulls' mean and sd, z = (mean − null mean) / null sd. The family-wise cut-off
+  is the 95th percentile of each group null's largest z over the brain. It also
+  gives each voxel's own empirical one-sided p, (1 + group nulls at least as
+  large) / (n + 1), and BH q. With 1,000 nulls p takes only the values k/1001
+  (smallest 1/1001), so read it uncorrected at those levels; BH over a brain
+  rarely passes. Nulls are not pooled over voxels, which would assume every
+  voxel's standardised nulls have the same shape. It is a fixed-effects test: it asks
+  whether these subjects' drops beat the null, not whether new subjects' would.
+- **Paired or not.** One directions file serves every subject, so null k is the
+  same direction in each. `--paired` averages direction k over subjects, giving
+  as many group nulls as directions (FWE floor 1/1000 with 1,000), and matches
+  the observed mean, which removes the same annotation from everyone. Unpaired
+  draws mix different directions across subjects; if a direction's cost is
+  correlated across subjects, they understate the null's spread.
+- **Saved group nulls.** A null drop involves no annotation, so
+  `--save-group-nulls` writes group nulls (float16, about 0.5 GB per 1,000 maps)
+  that serve any annotation the directions are variance-matched to; check with
+  `fmri-ablation nulls-check`, then test with `group-nulls`.
 
 Inputs are fit folders, `<fits>/<model>` holding `<subject>/chunks`. `--removed`
 turns maps into full − removed; `--xsub-ablation` uses a
@@ -57,5 +75,5 @@ turns maps into full − removed; `--xsub-ablation` uses a
 ## Python
 
 `group_inference` provides `to_template`, `sign_flip`, `bh_adjusted`,
-`region_test`, `harvard_oxford`, `null_draws`, `top_voxel_summary` and
-`save_results`.
+`region_test`, `harvard_oxford`, `null_draws` (`paired=`), `against_group_nulls`,
+`save_group_nulls`, `group_nulls_test`, `top_voxel_summary` and `save_results`.

@@ -57,16 +57,45 @@ fmri-ablation nulls-fit --run-table runs.csv --subject S01 --feature-root featur
   --regressors regressors --test-run test_story --directions nulls/bert.npz \
   --extra-root features/word_rate --output nullfits/bert --chunk 0 --start 0 --stop 125
 fmri-group-inference nulls --warps warps --full fits/bert --removed fits/bert_removed \
-  --nulls nullfits/bert --subjects S01,S02,... --output group --prefix bert_null
+  --nulls nullfits/bert --subjects S01,S02,... --paired --output group --prefix bert_null
 ```
 
 The cost is real: each direction is a full refit, so 1,000 of them cost 1,000
 times the ablation. `nulls-fit` checkpoints every 25 directions and resumes.
+
+The group test is paired (see [group inference](group_inference.md)). One
+directions file serves every subject, so null k is the same direction in each,
+and group null k averages it over subjects, as the observed group mean averages
+the same annotation.
+
+### Reusing Nulls For Another Annotation
+
+A null drop r_full − r_null_k involves no annotation, so fitted nulls can serve a
+second annotation on the same feature space and subjects, with no new fits. Two
+conditions apply, and `nulls-check` measures both:
+
+```bash
+fmri-ablation nulls-check --feature-root features --feature bert --regressors regressors_new \
+  --test-run test_story --directions nulls/bert.npz --output nulls/bert_check_new.json
+```
+
+- **Variance.** The directions were accepted within a tolerance of their own
+  annotation's share of feature variance. The new annotation must remove about
+  the same share (`within_tolerance`, `ratio_directions_to_annotation`).
+  Removing more variance costs more prediction, so against mismatched nulls an
+  annotation looks special, or not, for the wrong reason.
+- **Overlap.** The directions were orthogonalised on the original annotation, not
+  the new one. `overlap_median` / `overlap_95th` give the share of a direction's
+  series the new annotation's lags explain; it should be small.
+
+When both hold, test the new annotation against the existing nulls, or against
+saved group nulls (`fmri-group-inference nulls --paired --save-group-nulls`,
+then `fmri-group-inference group-nulls`).
 
 ## Python
 
 `ablation` provides:
 - removal: `orthogonalise`, `remove`, `build_removed_features`;
 - the null: `NullSpace` (`null_series`, `removed`, `project_out`),
-  `select_directions`, `fit_nulls`, `read_nulls`, and `score` (per-voxel net,
-  z and one-sided p against a null).
+  `select_directions`, `check_directions`, `fit_nulls`, `read_nulls`, and
+  `score` (per-voxel net, z and one-sided p against a null).
