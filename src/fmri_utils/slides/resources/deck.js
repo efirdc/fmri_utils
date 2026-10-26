@@ -17,6 +17,10 @@
   // "open in viewer" links go there; without it they open the local copy.
   const PUBLIC = ((document.querySelector('meta[name="deck-public-base"]') || {}).content || "").replace(/\/?$/, "/");
   const LOCAL = ["localhost", "127.0.0.1"].includes(location.hostname);
+  // A published copy can still be edited, as a demo, with <meta name="deck-edit-demo" content="true">:
+  // every editing tool works, nothing is saved, and a reload brings the published slides back.
+  const DEMO = !LOCAL && ((document.querySelector('meta[name="deck-edit-demo"]') || {}).content || "") === "true";
+  const EDITABLE = LOCAL || DEMO;
   const deck = document.getElementById("deck");
   let slides = Array.from(deck.querySelectorAll(":scope > .slide"));
   const counter = document.getElementById("counter");
@@ -116,7 +120,7 @@
     else if (event.key === "End") show(slides.length - 1, 0);
     else if (event.key === "]" || event.key === "[") stepCluster(event.key === "]" ? 1 : -1);
     else if (event.key === "f") { if (document.fullscreenElement) document.exitFullscreen(); else document.documentElement.requestFullscreen(); }
-    else if (event.key === "e" && LOCAL && window.Editor) window.Editor.toggle();
+    else if (event.key === "e" && EDITABLE && window.Editor) window.Editor.toggle();
     else if (event.key === "g" || /^[0-9]$/.test(event.key)) {
       // A digit (or g) starts typing a slide number into the counter; Enter jumps there.
       event.preventDefault();
@@ -174,6 +178,9 @@
         const loading = holder.querySelector(".loading");
         if (loading && !brain) loading.remove();
         try { frame.contentWindow.document.addEventListener("keydown", event => onKey(event, true)); } catch (e) { /* other origin */ }
+        // The deck is dark, so an embedded page is too, whatever the system's colour scheme
+        // (pages that follow prefers-color-scheme honour data-theme="dark").
+        try { frame.contentWindow.document.documentElement.dataset.theme = "dark"; } catch (e) { /* other origin */ }
         if (brain) { strip(embed); watchReady(embed); }
       });
       const link = make("a", "open-link", null, "open in viewer ↗");
@@ -339,8 +346,47 @@
         button.addEventListener("click", () => { press(embed, pickSelector(control, value)); setTimeout(() => { syncBar(embed); redrawColorbar(embed); }, 50); });
       });
     });
+    const regions = regionsOf(embed);
+    if (regions.length) {
+      const group = make("div", "seg", bar);
+      group.dataset.regions = "";
+      regions.forEach(({ volume, surface, label }) => {
+        const button = make("button", null, group, label);
+        button.type = "button";
+        button.dataset.volume = volume;
+        button.dataset.surface = surface;
+        button.addEventListener("click", () => setRegions(embed, volume, surface));
+      });
+    }
     make("span", "spacer", bar);
     bar.append(link);
+  }
+  // data-regions="cort/ho=Harvard-Oxford, tom=ToM parcels": which atlas outlines the brain. Each option
+  // names a volume atlas id and, after a slash, the surface parcellation id (the same when left out).
+  function regionsOf(embed) {
+    return (embed.dataset.regions || "").split(",").map(s => s.trim()).filter(Boolean).map(option => {
+      const [ids, label] = option.split("=").map(s => s.trim());
+      const [volume, surface] = ids.split("/").map(s => s.trim());
+      return { volume, surface: surface || volume, label: label || volume };
+    });
+  }
+  // Outlines every region of one atlas: in volume mode, clear the selection, choose the atlas and
+  // select all of it; in surface mode, choose the parcellation and show all of it. The choice is
+  // kept and applied again whenever the deck switches mode.
+  function setRegions(embed, volume, surface) {
+    embed._regions = { volume, surface };
+    applyRegions(embed);
+    syncBar(embed);
+  }
+  function applyRegions(embed) {
+    const viewer = viewerOf(embed);
+    if (!embed._regions || !viewer || !viewer.state) return;
+    const state = viewer.state;
+    state.surfaceAtlas = embed._regions.surface;
+    if (state.mode === "surface") { press(embed, "#roi-all"); return; }
+    press(embed, "#roi-clear");
+    state.atlas = embed._regions.volume;
+    press(embed, "#roi-all");
   }
   function press(embed, selector) {
     const doc = viewerDocument(embed);
@@ -351,6 +397,7 @@
   }
   function setMode(embed, mode) {
     if (!press(embed, `#modes [data-mode-kind="${mode}"]`)) return;
+    applyRegions(embed);
     syncBar(embed);
     // Surfaces load after the switch; bring the current cluster back once they are there.
     if (embed._tour) settle(embed);
@@ -385,6 +432,11 @@
         b.disabled = !source || source.disabled;
         b.setAttribute("aria-pressed", String(!!source && source.getAttribute("aria-pressed") === "true"));
       });
+    });
+    bar.querySelectorAll("[data-regions]").forEach(group => {
+      const buttons = [...group.querySelectorAll("button")];
+      const current = embed._regions ? embed._regions.volume : buttons.length && buttons[0].dataset.volume;
+      buttons.forEach(b => b.setAttribute("aria-pressed", String(b.dataset.volume === current)));
     });
     // The viewer builds its feature and variant buttons once an endpoint is up; until then, look again.
     if (bar.querySelector("[data-pick] button") && !doc.querySelector("#features button, #variants button")) setTimeout(() => syncBar(embed), 300);
@@ -611,6 +663,8 @@
   const listeners = [];
   window.Deck = {
     LOCAL,
+    DEMO,
+    EDITABLE,
     get slides() { return slides; },
     get index() { return index; },
     get step() { return step; },

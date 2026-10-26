@@ -24,7 +24,9 @@
   "use strict";
   const D = window.Deck;
   if (!D) return;
-  const LOCAL = D.LOCAL;
+  const LOCAL = D.LOCAL;                    // served by the deck server: saving works
+  const EDITABLE = D.EDITABLE || LOCAL;     // editing works (locally, or as a published demo)
+  const DEMO = !LOCAL && EDITABLE;
   const deckEl = D.element;
   const SORTER_WIDTH = 214, THUMB_WIDTH = 166;
 
@@ -105,6 +107,7 @@
     drawOverlay();
   }
   function save() {
+    if (DEMO) { D.flash("demo copy: edits are not saved and are discarded when the page reloads", 3000); return; }
     if (!LOCAL) return;
     const body = D.serialise();
     fetch("__save", { method: "POST", body })
@@ -121,10 +124,10 @@
   const sorter = h("aside", { id: "sorter", tabindex: "0" },
     h("div", { class: "sorter-head" },
       h("span", { class: "sorter-title", text: "Slides" }), sorterState,
-      LOCAL ? h("button", { type: "button", class: "icon", title: "edit slides (E)", text: "✎", onclick: () => editor.toggle() }) : null,
+      EDITABLE ? h("button", { type: "button", class: "icon", title: "edit slides (E)", text: "✎", onclick: () => editor.toggle() }) : null,
       h("button", { type: "button", class: "icon", title: "hide the slide list", text: "«", onclick: () => setSorter(false) })),
     sorterList,
-    LOCAL ? h("div", { class: "sorter-foot" },
+    EDITABLE ? h("div", { class: "sorter-foot" },
       h("button", { type: "button", text: "+ New slide", onclick: event => newSlideMenu(event.currentTarget) }),
       h("button", { type: "button", text: "Duplicate", onclick: () => duplicateSlides() }),
       h("button", { type: "button", text: "Delete", onclick: () => deleteSlides() })) : null);
@@ -158,11 +161,11 @@
   function renderSorter() {
     const scroll = sorterList.scrollTop;
     sorterList.replaceChildren(...D.slides.map((section, i) => {
-      const item = h("div", { class: "sorter-item", draggable: LOCAL ? "true" : null, "data-index": i },
+      const item = h("div", { class: "sorter-item", draggable: EDITABLE ? "true" : null, "data-index": i },
         h("span", { class: "sorter-number", text: String(i + 1) }), thumbOf(section));
       item.addEventListener("click", event => clickSlide(event, i));
-      item.addEventListener("contextmenu", event => { if (LOCAL) { event.preventDefault(); slideMenu(event, i); } });
-      if (LOCAL) wireDrag(item, i);
+      item.addEventListener("contextmenu", event => { if (EDITABLE) { event.preventDefault(); slideMenu(event, i); } });
+      if (EDITABLE) wireDrag(item, i);
       return item;
     }));
     sorterList.scrollTop = scroll;
@@ -202,7 +205,7 @@
       selectedSlides = new Set([i]); anchor = i; D.show(i, 0);
       return;
     }
-    if (!LOCAL) return;
+    if (!EDITABLE) return;
     let handled = true;
     if (ctrl && key === "c") copySlides();
     else if (ctrl && key === "x") { copySlides(); deleteSlides(); }
@@ -382,13 +385,13 @@
     section.querySelectorAll("[contenteditable]").forEach(el => el.removeAttribute("contenteditable"));
   }
   function enter() {
-    if (!LOCAL || editor.active) return;
+    if (!EDITABLE || editor.active) return;
     editor.active = true;
     instantly(() => document.body.classList.add("editing"));
     D.slides.forEach(prepare);
     layoutChanged();
     updateToolbar();
-    D.flash("editing · click text to type · drag a frame's edge to move · right-click for more · Ctrl+S saves", 3500);
+    D.flash(DEMO ? "demo editing · nothing is saved: reloading the page discards every change" : "editing · click text to type · drag a frame's edge to move · right-click for more · Ctrl+S saves", DEMO ? 6000 : 3500);
   }
   function exit() {
     if (!editor.active) return;
@@ -848,6 +851,8 @@
     commit();
   }
   function upload(file) {
+    // A demo has no server to keep the file: the picture lives in this page until it reloads.
+    if (DEMO) return Promise.resolve(URL.createObjectURL(file));
     return fetch("__upload", { method: "POST", headers: { "X-Filename": encodeURIComponent(file.name || "pasted.png") }, body: file })
       .then(r => { if (!r.ok) throw new Error(r.status); return r.json(); })
       .then(json => json.path);
@@ -859,7 +864,7 @@
       const width = 40, height = width * 1.7778 * probe.naturalHeight / probe.naturalWidth;
       const left = at ? at.left - width / 2 : 30, top = at ? at.top - height / 2 : clamp(50 - height / 2, 2, 90);
       upload(file).then(path => {
-        URL.revokeObjectURL(url);
+        if (!DEMO) URL.revokeObjectURL(url);
         placeElements([`<div class="box image" style="left: ${round(left)}%; top: ${round(top)}%; width: ${width}%; height: ${round(height)}%;"><img src="${path}" alt=""></div>`], 0);
       }).catch(e => D.flash(`image not saved (${e.message}); is serve_talk.py running?`, 4000));
     };
@@ -1385,7 +1390,7 @@
   }
   function updateState() {
     const unsaved = LOCAL && dirty();
-    stateLabel.textContent = unsaved ? "unsaved" : "saved";
+    stateLabel.textContent = DEMO ? "demo · edits are discarded on reload" : unsaved ? "unsaved" : "saved";
     stateLabel.classList.toggle("unsaved", unsaved);
     sorterState.classList.toggle("unsaved", unsaved);
     undoButton.disabled = history.at <= 0;

@@ -62,6 +62,11 @@ my-talk/
 - **`public_base`** is where the deck and its mounts are published. Each embed's
   "open in viewer" link goes there. The same value is set in `index.html` as
   `<meta name="deck-public-base">`.
+- **Demo editing.** `<meta name="deck-edit-demo" content="true">` in `index.html`
+  lets the published copy be edited too: every editing tool works, but nothing is
+  saved. The toolbar and a notice say that reloading the page discards every
+  change, and inserted pictures live only in the page. Without the tag, only the
+  local copy can be edited.
 
 `fmri-slides assets my-talk` refreshes a deck's copy of `deck.js`, `editor.js`,
 `deck.css` and `vendor/` from the installed package.
@@ -159,6 +164,11 @@ as just the brain:
   - any other name is a variant control of the endpoint, with option ids from
     the manifest;
   - groups are separated by `;`.
+- `data-regions="cort/ho=Harvard-Oxford, tom=ToM parcels"` adds a switch for
+  the atlas that outlines the brain. Each option names a volume atlas id and,
+  after a slash, the surface parcellation id (the same when left out). Choosing
+  one outlines every region of that atlas in volume mode and shows that
+  parcellation in surface mode; the choice survives switching mode.
 - The deck drives the viewer through its documented scripting API and stable
   selectors ([viewer.md](viewer.md#driving-it-from-another-page)).
 
