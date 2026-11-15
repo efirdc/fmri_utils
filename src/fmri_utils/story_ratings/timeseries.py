@@ -67,7 +67,7 @@ def ratings_to_timeseries(
 
     frame = pd.DataFrame({"sample_index": np.arange(len(sample_times)), "sample_time_s": sample_times})
     frame["word_rate"] = word_rate
-    fields = [spec.scale.name, *spec.flags]
+    fields = [*(scale.name for scale in spec.scales), *spec.flags]
     for field in fields:
         per_word_values = np.repeat(consensus[f"{field}_mean"].to_numpy(), counts)
         load = weights @ per_word_values

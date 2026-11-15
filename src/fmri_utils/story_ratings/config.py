@@ -35,10 +35,14 @@ class RatingSpec:
     categorical fields. The theory-of-mind example in the docs uses a 0-3
     scale, four flags, and one categorical field, but nothing here is specific
     to that construct: an arousal rating, a topic label, or a dialogue-act
-    code fits the same shape.
+    code fits the same shape. ``extra_scales`` adds more ordinal fields rated
+    alongside the first, for example one intensity per emotion; each is stored
+    and summarised like the scale, and agreement and the level distribution
+    use the first.
     """
 
     scale: ScaleField = field(default_factory=ScaleField)
+    extra_scales: Tuple[ScaleField, ...] = ()
     flags: Tuple[str, ...] = ()
     categoricals: Mapping[str, Tuple[str, ...]] = field(default_factory=dict)
     include_confidence: bool = True
@@ -47,9 +51,14 @@ class RatingSpec:
     # the reason justifying a rating already given (structured output writes fields in order).
     reason_first: bool = False
 
+    @property
+    def scales(self) -> Tuple[ScaleField, ...]:
+        return (self.scale, *self.extra_scales)
+
     def validate(self) -> None:
-        self.scale.validate()
-        names = [self.scale.name, *self.flags, *self.categoricals]
+        for scale in self.scales:
+            scale.validate()
+        names = [*(scale.name for scale in self.scales), *self.flags, *self.categoricals]
         if self.include_confidence:
             names.append("confidence")
         if self.include_reason:
@@ -65,7 +74,7 @@ class RatingSpec:
 
     @property
     def field_names(self) -> Tuple[str, ...]:
-        names = ["index", self.scale.name, *self.flags, *self.categoricals]
+        names = ["index", *(scale.name for scale in self.scales), *self.flags, *self.categoricals]
         if self.include_confidence:
             names.append("confidence")
         if self.include_reason:

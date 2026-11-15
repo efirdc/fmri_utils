@@ -45,7 +45,8 @@ def build_schema(spec: RatingSpec, *, compact: bool = False, bounded_integers: b
     properties: Dict[str, Any] = {name_of("index"): {"type": "integer"}}
     if spec.include_reason and spec.reason_first:
         properties[name_of("reason")] = {"type": "string"}
-    properties[name_of(spec.scale.name)] = integer(spec.scale.minimum, spec.scale.maximum)
+    for scale in spec.scales:
+        properties[name_of(scale.name)] = integer(scale.minimum, scale.maximum)
     for flag in spec.flags:
         properties[name_of(flag)] = integer(0, 1)
     for categorical, choices in spec.categoricals.items():
@@ -92,9 +93,10 @@ def validate_ratings(payload: Mapping[str, Any], n_items: int, spec: RatingSpec)
     if [int(item["index"]) for item in ordered] != list(range(n_items)):
         raise ValueError("rating indices are not exactly 0..n-1")
     for item in ordered:
-        value = int(item[spec.scale.name])
-        if not spec.scale.minimum <= value <= spec.scale.maximum:
-            raise ValueError(f"{spec.scale.name}={value} is outside the scale")
+        for scale in spec.scales:
+            value = int(item[scale.name])
+            if not scale.minimum <= value <= scale.maximum:
+                raise ValueError(f"{scale.name}={value} is outside the scale")
         for categorical, choices in spec.categoricals.items():
             if item[categorical] not in choices:
                 raise ValueError(f"{categorical}={item[categorical]!r} is not one of {choices}")

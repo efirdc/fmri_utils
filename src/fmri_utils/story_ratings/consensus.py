@@ -61,11 +61,9 @@ def consensus_table(
     raters chose it. Reasons are kept joined, since they are the main way to
     audit a rating by hand.
     """
-    scale = spec.scale
     rows: List[Dict[str, Any]] = []
     for position, segment in enumerate(segments):
         values = [replicate[position] for replicate in replicates]
-        scores = np.asarray([float(item[scale.name]) for item in values])
         row: Dict[str, Any] = {
             "index": segment.index,
             "onset_s": segment.onset,
@@ -74,12 +72,14 @@ def consensus_table(
             "n_words": segment.n_words,
             "text": segment.text,
             "n_raters": len(values),
-            f"{scale.name}_mean": float(scores.mean()),
-            f"{scale.name}_sd": float(scores.std()),
-            f"{scale.name}_min": float(scores.min()),
-            f"{scale.name}_max": float(scores.max()),
-            f"{scale.name}_by_replicate": ";".join(str(int(value)) for value in scores),
         }
+        for scale in spec.scales:
+            scores = np.asarray([float(item[scale.name]) for item in values])
+            row[f"{scale.name}_mean"] = float(scores.mean())
+            row[f"{scale.name}_sd"] = float(scores.std())
+            row[f"{scale.name}_min"] = float(scores.min())
+            row[f"{scale.name}_max"] = float(scores.max())
+            row[f"{scale.name}_by_replicate"] = ";".join(str(int(value)) for value in scores)
         for flag in spec.flags:
             row[f"{flag}_mean"] = float(np.mean([float(item[flag]) for item in values]))
         for categorical in spec.categoricals:

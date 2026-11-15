@@ -147,6 +147,19 @@ def test_validate_ratings_rejects_missing_and_out_of_range():
         validate_ratings({"ratings": [{"index": 0, "rating": 9}]}, 1, spec)
 
 
+def test_extra_scales_are_rated_validated_and_summarised():
+    spec = RatingSpec(scale=ScaleField("joy", 0, 3), extra_scales=(ScaleField("fear", 0, 3),), flags=("named",),
+                      categoricals={}, include_reason=False, include_confidence=False)
+    properties = build_schema(spec)["properties"]["ratings"]["items"]["properties"]
+    assert list(properties) == ["index", "joy", "fear", "named"]
+    with pytest.raises(ValueError, match="fear=4 is outside"):
+        validate_ratings({"ratings": [{"index": 0, "joy": 1, "fear": 4, "named": 0}]}, 1, spec)
+    segments = segment_words(punctuated_words(), SegmentationConfig(mode="sentence"))
+    replicate = [{"index": i, "joy": i, "fear": 3 - i, "named": 0} for i in range(2)]
+    table = consensus_table(segments, [replicate], spec)
+    assert table["joy_mean"].tolist() == [0.0, 1.0] and table["fear_mean"].tolist() == [3.0, 2.0]
+
+
 def test_build_prompt_numbers_segments():
     prompt = build_prompt("Rate:\n{utterances}\nEnd.", ["first", "second"])
     assert "000 | first" in prompt and "001 | second" in prompt

@@ -23,19 +23,25 @@ def load_spec(path: Optional[Path]) -> RatingSpec:
           "flags": ["emotion", "intention"],
           "categoricals": {"target": ["none", "self", "other", "both"]}
         }
+
+    ``"scales": [...]`` in place of ``"scale"`` gives several ordinal fields (the first is the main one).
     """
     if path is None:
         return RatingSpec()
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
-    scale = payload.get("scale", {})
-    return RatingSpec(
-        scale=ScaleField(
+    scales = [
+        ScaleField(
             name=scale.get("name", "rating"),
             minimum=int(scale.get("minimum", 0)),
             maximum=int(scale.get("maximum", 3)),
             description=scale.get("description", ""),
             level_labels=tuple(scale.get("level_labels", ())),
-        ),
+        )
+        for scale in payload.get("scales") or [payload.get("scale", {})]
+    ]
+    return RatingSpec(
+        scale=scales[0],
+        extra_scales=tuple(scales[1:]),
         flags=tuple(payload.get("flags", ())),
         categoricals={name: tuple(choices) for name, choices in payload.get("categoricals", {}).items()},
         include_confidence=bool(payload.get("include_confidence", True)),

@@ -46,7 +46,7 @@ def _prompt_fingerprint(config: RatingRunConfig, texts: Sequence[str]) -> str:
     payload = {
         "schema_version": SCHEMA_VERSION,
         "prompt": build_prompt(config.prompt_template, texts, config.utterance_placeholder),
-        "spec": [config.spec.scale.name, *config.spec.flags, *sorted(config.spec.categoricals)],
+        "spec": [*(scale.name for scale in config.spec.scales), *config.spec.flags, *sorted(config.spec.categoricals)],
         "backend": provider.backend,
         "model": provider.model,
         "thinking": provider.thinking,
@@ -187,6 +187,7 @@ def rate_story(
         "fingerprint": fingerprint,
         "segmentation": vars(config.segmentation),
         "scale": vars(config.spec.scale),
+        **({"extra_scales": [vars(scale) for scale in config.spec.extra_scales]} if config.spec.extra_scales else {}),
         "flags": list(config.spec.flags),
         "categoricals": {name: list(choices) for name, choices in config.spec.categoricals.items()},
         "n_words": len(words),
@@ -194,7 +195,7 @@ def rate_story(
         "mean_words_per_segment": float(consensus["n_words"].mean()),
         "agreement": rater_agreement(replicates, config.spec),
         "distribution": rating_distribution(replicates, config.spec),
-        f"mean_{config.spec.scale.name}": float(consensus[f"{config.spec.scale.name}_mean"].mean()),
+        **{f"mean_{scale.name}": float(consensus[f"{scale.name}_mean"].mean()) for scale in config.spec.scales},
         "usage_total": usage.to_dict(config.provider.model),
         "segments": segments_to_records(segments),
     }
