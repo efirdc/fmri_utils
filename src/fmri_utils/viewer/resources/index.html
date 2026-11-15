@@ -725,6 +725,10 @@
     // What the reader last chose, as opposed to what the map on screen
     // allows; see setThresholdMode and renderBar.
     thresholdWanted: "value", spaceWanted: "mni", surfaceSpaceWanted: "fsnative",
+    // Whether the reader has clicked a threshold mode: "value" is also where
+    // the page starts, and only that starting value gives way to a variant's
+    // threshold_default.
+    thresholdPicked: false,
     geometry: "inflated", hemispheres: { lh: true, rh: true },
     atlas: null, regions: {}, mode: "volume", surfaceSpace: "fsnative",
     montagePage: 0,
@@ -1011,9 +1015,11 @@
     return (endpoint && endpoint.variant_controls) || null;
   }
 
-  function variantAvailable(variant) {
+  // anyFeature: whether some feature of this subject has the variant, not
+  // only the one on screen.
+  function variantAvailable(variant, anyFeature) {
     return subjectMaps().some(function (m) {
-      return m.feature === state.feature && m.variant === variant.id;
+      return (anyFeature || m.feature === state.feature) && m.variant === variant.id;
     });
   }
 
@@ -1040,8 +1046,9 @@
 
   // Which options of a control the subject and feature on screen can show,
   // given the controls above it: a group test is offered for Δr, not for the
-  // encoding correlation it has no test of.
-  function controlOptions(control) {
+  // encoding correlation it has no test of. With anyFeature, the options some
+  // feature of this subject can show.
+  function controlOptions(control, anyFeature) {
     var ids = control.kind === "toggle" ? [control.on, control.off]
       : (control.options || []).map(function (o) { return o.id; });
     var controls = variantControls();
@@ -1050,7 +1057,7 @@
     return ids.filter(function (id) {
       return (state.endpoint.variants || []).some(function (variant) {
         var values = variant.values || {};
-        if (values[control.id] !== id || !variantAvailable(variant)) return false;
+        if (values[control.id] !== id || !variantAvailable(variant, anyFeature)) return false;
         return above.every(function (other) {
           return values[other.id] === undefined || current[other.id] === undefined ||
             values[other.id] === current[other.id];
@@ -8873,18 +8880,24 @@
   }
 
   // A checkbox or a segmented row per control, each only while it applies to
-  // the variant on screen and has more than one option this subject can show.
+  // the variant on screen and has more than one option this subject can show
+  // under some feature. Options the feature on screen lacks are greyed rather
+  // than hidden, so every feature shows the same controls in the same places.
   function renderVariantControls() {
     var controls = variantControls();
     var current = currentVariant();
     var values = (current && current.values) || {};
+    var featureLabel = ((state.endpoint.features || []).filter(function (f) {
+      return f.id === state.feature;
+    })[0] || {}).label || state.feature;
     el["variant-label"].hidden = true;
     el.variants.className = "controls";
     var shown = 0;
     controls.forEach(function (control) {
       if (values[control.id] === undefined) return;
       var options = controlOptions(control);
-      if (options.length < 2) return;
+      var possible = controlOptions(control, true);
+      if (possible.length < 2) return;
       shown += 1;
       var pick = function (id) {
         var before = currentRange();
@@ -8892,7 +8905,7 @@
         resolveVariant(control.id);
         var chosen = currentVariant();
         var wanted = chosen && chosen.threshold_default;
-        if (wanted && (!state.thresholdWanted || state.thresholdWanted === "value")) {
+        if (wanted && !state.thresholdPicked && (!state.thresholdWanted || state.thresholdWanted === "value")) {
           state.thresholdWanted = wanted.mode;
           setThresholdMode(wanted.mode, wanted.value);
         }
@@ -8910,6 +8923,8 @@
         var box = document.createElement("input");
         box.type = "checkbox";
         box.checked = values[control.id] === control.on;
+        box.disabled = options.length < 2;
+        if (box.disabled) row.setAttribute("data-tip", "not available for " + featureLabel);
         box.addEventListener("change", function () { pick(box.checked ? control.on : control.off); });
         var text = document.createElement("span");
         text.textContent = control.label;
@@ -8946,7 +8961,11 @@
           if (option.tip) node.setAttribute("data-tip", option.tip);
           node.setAttribute("aria-pressed", values[control.id] === option.id ? "true" : "false");
           node.disabled = options.indexOf(option.id) === -1;
-          if (node.disabled && option.unavailable) node.setAttribute("data-tip", option.unavailable);
+          if (node.disabled && possible.indexOf(option.id) !== -1) {
+            node.setAttribute("data-tip", "not available for " + featureLabel);
+          } else if (node.disabled && option.unavailable) {
+            node.setAttribute("data-tip", option.unavailable);
+          }
           node.addEventListener("click", function () { pick(option.id); });
           seg.appendChild(node);
         });
@@ -9624,6 +9643,7 @@
       var target = event.target.closest("button");
       if (!target || target.disabled) return;
       state.thresholdWanted = target.getAttribute("data-mode");
+      state.thresholdPicked = true;
       setThresholdMode(state.thresholdWanted);
       refreshStyle();
     });

@@ -339,7 +339,8 @@ def relax_polylines(points: np.ndarray, offsets: np.ndarray, passes: int = 20,
 
 
 def write_parcellation(out_dir, atlas_id: str, label: str, regions: list[dict],
-                       hemispheres: dict, smooth_rounds: int = 20, sparse: bool = False) -> dict:
+                       hemispheres: dict, smooth_rounds: int = 20, sparse: bool = False,
+                       keep_fraction: float = 0.3) -> dict:
     """Clean, trace and write one parcellation for the viewer; return its record.
 
     ``hemispheres`` maps ``"lh"``/``"rh"`` to ``{"labels": raw per-vertex labels,
@@ -362,6 +363,10 @@ def write_parcellation(out_dir, atlas_id: str, label: str, regions: list[dict],
     cleaned and traced, so each region's edge against uncovered cortex is
     smoothed and drawn like any other boundary. The background is written
     back as 0 and gets no anchor.
+
+    ``keep_fraction`` goes to ``clean_parcellation``: pieces of a region smaller
+    than that fraction of its largest piece are relabelled. 0 keeps every piece,
+    for a region that is genuinely scattered (a meta-analysis map).
     """
     from pathlib import Path
 
@@ -380,7 +385,8 @@ def write_parcellation(out_dir, atlas_id: str, label: str, regions: list[dict],
             background = int(max([r["value"] for r in regions] + [int(raw.max())])) + 1
             raw = raw.copy()
             raw[keep & (raw == 0)] = background
-        labels = clean_parcellation(raw, faces, keep=keep, smooth_rounds=smooth_rounds)
+        labels = clean_parcellation(raw, faces, keep=keep, smooth_rounds=smooth_rounds,
+                                    keep_fraction=keep_fraction)
         indices, weights, offsets = boundary_network(labels, flat_faces)
         anchors = region_anchors(labels, flat_faces)
         if background is not None:

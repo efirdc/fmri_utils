@@ -188,7 +188,8 @@ def add_atlas_parcellation(subject_dir, atlas_id: str, label: str, atlas, region
                            depths: Sequence[float] = (0.1, 0.3, 0.5, 0.7, 0.9),
                            fill_mm: float = 3.0, smooth_rounds: int = 20,
                            exclude: Iterable[str] = (), drop_absent: bool = True,
-                           sparse: bool = False, space: str | None = "MNI152NLin6Asym") -> dict:
+                           sparse: bool = False, space: str | None = "MNI152NLin6Asym",
+                           keep_fraction: float = 0.3) -> dict:
     """Sample ``atlas`` onto one subject's export and add it as a parcellation.
 
     ``subject_dir`` is one subject's folder of an ``export_surfaces`` output
@@ -199,6 +200,8 @@ def add_atlas_parcellation(subject_dir, atlas_id: str, label: str, atlas, region
     regions that are on this surface. ``sparse`` marks an atlas that covers
     only part of the cortex (``write_parcellation``); give it a small
     ``fill_mm`` too, or the gap filling grows every region by that much.
+    ``keep_fraction`` 0 keeps every piece of a scattered region
+    (``write_parcellation``).
     Returns the parcellation record, which is also written into
     ``surfaces.json`` under ``parcellations[atlas_id]``.
     """
@@ -218,7 +221,8 @@ def add_atlas_parcellation(subject_dir, atlas_id: str, label: str, atlas, region
                                       {h: {"labels": m["labels"], "faces": m["faces"],
                                            "flat_faces": m["flat_faces"]}
                                        for h, m in meshes.items()},
-                                      smooth_rounds=smooth_rounds, sparse=sparse)
+                                      smooth_rounds=smooth_rounds, sparse=sparse,
+                                      keep_fraction=keep_fraction)
     record_path = subject_dir / "surfaces.json"
     record = json.loads(record_path.read_text(encoding="utf-8"))
     record.setdefault("parcellations", {})[atlas_id] = parcellation
