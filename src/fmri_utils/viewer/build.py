@@ -205,6 +205,10 @@ def _variant_control(control) -> dict:
     record = {"id": control.id, "label": control.label}
     if control.tip:
         record["tip"] = control.tip
+    if getattr(control, "keep", False):
+        record["keep"] = True
+    if getattr(control, "unused_tip", ""):
+        record["unused_tip"] = control.unused_tip
     if control.is_toggle:
         record.update(kind="toggle", on=control.on, off=control.off)
     else:

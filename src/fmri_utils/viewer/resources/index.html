@@ -8894,10 +8894,14 @@
     el.variants.className = "controls";
     var shown = 0;
     controls.forEach(function (control) {
-      if (values[control.id] === undefined) return;
-      var options = controlOptions(control);
-      var possible = controlOptions(control, true);
-      if (possible.length < 2) return;
+      // A control the variant on screen does not use is left out, unless the control asks to be kept ("keep":
+      // say an emotion prompt under a mentalizing rating): then it stays in place, greyed, so it does not come
+      // and go as the reader switches.
+      var unused = values[control.id] === undefined;
+      if (unused && !(control.keep && control.kind !== "toggle")) return;
+      var options = unused ? [] : controlOptions(control);
+      var possible = unused ? [] : controlOptions(control, true);
+      if (!unused && possible.length < 2) return;
       shown += 1;
       var pick = function (id) {
         var before = currentRange();
@@ -8961,7 +8965,9 @@
           if (option.tip) node.setAttribute("data-tip", option.tip);
           node.setAttribute("aria-pressed", values[control.id] === option.id ? "true" : "false");
           node.disabled = options.indexOf(option.id) === -1;
-          if (node.disabled && possible.indexOf(option.id) !== -1) {
+          if (unused) {
+            node.setAttribute("data-tip", control.unused_tip || "not used by this choice");
+          } else if (node.disabled && possible.indexOf(option.id) !== -1) {
             node.setAttribute("data-tip", "not available for " + featureLabel);
           } else if (node.disabled && option.unavailable) {
             node.setAttribute("data-tip", option.unavailable);

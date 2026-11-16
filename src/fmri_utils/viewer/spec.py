@@ -188,7 +188,9 @@ class VariantControl:
     variant, among those the subject and feature on screen have, that agrees
     with the most important of them (earlier controls outrank later ones). A
     control shows only while the variant on screen has a value for it and the
-    subject has at least two of its options. Picks carry over to another
+    subject has at least two of its options; with ``keep`` (segmented controls
+    only) it stays in place, every option greyed with ``unused_tip``, while the
+    variant on screen has no value for it. Picks carry over to another
     endpoint with a control of the same ``id``.
     """
 
@@ -198,6 +200,8 @@ class VariantControl:
     on: str = ""
     off: str = ""
     tip: str = ""
+    keep: bool = False
+    unused_tip: str = ""
 
     @property
     def is_toggle(self) -> bool:
