@@ -454,5 +454,23 @@ class EncodingChunkTests(unittest.TestCase):
 
 
 
+class RidgeKernelRouteTest(unittest.TestCase):
+    def test_kernel_route_matches_svd(self):
+        from fmri_utils.encoding.model import _RidgeSVD
+        rng = np.random.default_rng(0)
+        for rows, columns in ((40, 300), (60, 25)):
+            x_train = rng.standard_normal((rows, columns)).astype(np.float32)
+            x_test = rng.standard_normal((15, columns)).astype(np.float32)
+            y_train = rng.standard_normal((rows, 7)).astype(np.float32)
+            svd = _RidgeSVD(x_train, x_test, method="svd")
+            kernel = _RidgeSVD(x_train, x_test, method="kernel")
+            self.assertEqual(_RidgeSVD(x_train, x_test).method, "kernel" if columns > rows else "svd")
+            for alpha in (0.1, 10.0, 1e4):
+                x, y = x_train.astype(np.float64), y_train.astype(np.float64)
+                expected = x_test.astype(np.float64) @ np.linalg.solve(x.T @ x + alpha * np.eye(columns), x.T @ y)
+                np.testing.assert_allclose(svd.predict(y_train, alpha), expected, rtol=1e-4, atol=1e-5)
+                np.testing.assert_allclose(kernel.predict(y_train, alpha), expected, rtol=1e-4, atol=1e-5)
+
+
 if __name__ == "__main__":
     unittest.main()

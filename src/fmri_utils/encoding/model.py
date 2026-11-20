@@ -153,16 +153,47 @@ def _fit_predict_ridge(
     return factorization.predict(y_train, alpha)
 
 
-class _RidgeSVD:
-    """Reusable SVD ridge solver for many alphas and target chunks."""
+def _gram(x_train: np.ndarray, x_test: np.ndarray, block: int = 2048) -> Tuple[np.ndarray, np.ndarray]:
+    """``X X^T`` and ``X_test X^T`` in float64, a slab of columns at a time (no float64 copy of X)."""
+    gram = np.zeros((x_train.shape[0], x_train.shape[0]), dtype=np.float64)
+    cross = np.zeros((x_test.shape[0], x_train.shape[0]), dtype=np.float64)
+    for start in range(0, x_train.shape[1], block):
+        columns = np.asarray(x_train[:, start:start + block], dtype=np.float64)
+        gram += columns @ columns.T
+        cross += np.asarray(x_test[:, start:start + block], dtype=np.float64) @ columns.T
+    return gram, cross
 
-    def __init__(self, x_train: np.ndarray, x_test: np.ndarray):
-        u, singular, vt = np.linalg.svd(
-            np.asarray(x_train, dtype=np.float64), full_matrices=False
-        )
-        self.u_t = u.T
-        self.singular = singular
-        self.test_v = np.asarray(x_test, dtype=np.float64) @ vt.T
+
+class _RidgeSVD:
+    """Reusable ridge solver for many alphas and target chunks.
+
+    A prediction is ``T diag(1 / (s^2 + alpha)) U^T y`` with ``T = X_test V S``, from the thin SVD
+    ``X = U S V^T``. A design with more columns than rows (full LLM hidden states, no PCA) takes the
+    kernel route: the eigenvectors of ``X X^T`` are ``U``, its eigenvalues are ``s^2``, and
+    ``X_test X^T U = X_test V S``. The predictions are the same (kernel ridge with a linear kernel is
+    ridge), but the cost is a rows x rows eigendecomposition instead of an SVD of the wide matrix.
+    """
+
+    def __init__(self, x_train: np.ndarray, x_test: np.ndarray, method: str = "auto"):
+        if method == "auto":
+            method = "kernel" if x_train.shape[1] > x_train.shape[0] else "svd"
+        if method == "svd":
+            u, singular, vt = np.linalg.svd(
+                np.asarray(x_train, dtype=np.float64), full_matrices=False
+            )
+            self.u_t = u.T
+            self.eigen = singular**2
+            self.test_t = (np.asarray(x_test, dtype=np.float64) @ vt.T) * singular[None, :]
+        elif method == "kernel":
+            gram, cross = _gram(x_train, x_test)
+            eigen, vectors = np.linalg.eigh(gram)
+            del gram
+            self.u_t = vectors.T
+            self.eigen = np.clip(eigen, 0.0, None)
+            self.test_t = cross @ vectors
+        else:
+            raise ValueError(f"method must be auto, svd or kernel, not {method!r}")
+        self.method = method
 
     def project(self, y_train: np.ndarray) -> np.ndarray:
         """``U^T y``: the alpha-independent part of every prediction."""
@@ -176,14 +207,14 @@ class _RidgeSVD:
         """Predict at one alpha; pass ``projected`` to reuse ``project(y_train)``."""
         if projected is None:
             projected = self.project(y_train)
-        denominator = self.singular**2 + float(alpha)
+        denominator = self.eigen + float(alpha)
         factors = np.divide(
-            self.singular,
+            1.0,
             denominator,
-            out=np.zeros_like(self.singular),
+            out=np.zeros_like(self.eigen),
             where=denominator > 0,
         )
-        prediction = (self.test_v * factors[None, :]) @ projected
+        prediction = (self.test_t * factors[None, :]) @ projected
         return np.asarray(prediction, dtype=np.float32)
 
 
