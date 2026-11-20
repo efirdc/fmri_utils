@@ -48,6 +48,7 @@ class EncodingResult:
     empirical_p: np.ndarray
     signed_z: np.ndarray
     metadata: Dict[str, object]
+    outer_selected_scale: Optional[np.ndarray] = None
 
 
 @dataclass
@@ -58,6 +59,7 @@ class _ObservedFit:
     outer_r2: np.ndarray
     outer_alpha: np.ndarray
     outer_pca: np.ndarray
+    outer_scale: np.ndarray
     observed: Tuple[np.ndarray, ...]
     predicted: Tuple[np.ndarray, ...]
     test_run_indices: Tuple[np.ndarray, ...]
@@ -185,15 +187,24 @@ class _RidgeSVD:
             self.eigen = singular**2
             self.test_t = (np.asarray(x_test, dtype=np.float64) @ vt.T) * singular[None, :]
         elif method == "kernel":
-            gram, cross = _gram(x_train, x_test)
-            eigen, vectors = np.linalg.eigh(gram)
-            del gram
-            self.u_t = vectors.T
-            self.eigen = np.clip(eigen, 0.0, None)
-            self.test_t = cross @ vectors
+            self._from_gram(*_gram(x_train, x_test))
         else:
             raise ValueError(f"method must be auto, svd or kernel, not {method!r}")
         self.method = method
+
+    def _from_gram(self, gram: np.ndarray, cross: np.ndarray) -> None:
+        eigen, vectors = np.linalg.eigh(gram)
+        self.u_t = vectors.T
+        self.eigen = np.clip(eigen, 0.0, None)
+        self.test_t = cross @ vectors
+
+    @classmethod
+    def from_gram(cls, gram: np.ndarray, cross: np.ndarray) -> "_RidgeSVD":
+        """The kernel route from a precomputed ``X X^T`` and ``X_test X^T`` (float64)."""
+        solver = cls.__new__(cls)
+        solver._from_gram(gram, cross)
+        solver.method = "kernel"
+        return solver
 
     def project(self, y_train: np.ndarray) -> np.ndarray:
         """``U^T y``: the alpha-independent part of every prediction."""
@@ -218,12 +229,54 @@ class _RidgeSVD:
         return np.asarray(prediction, dtype=np.float32)
 
 
-def _grid(config: EncodingConfig) -> List[Tuple[Optional[int], float]]:
+def _grid(config: EncodingConfig) -> List[Tuple[Optional[int], float, float]]:
+    """Every (PCA size, band scale, alpha) candidate; the scale is 1.0 when nothing is banded."""
+    scales = config.band_scales if config.band_columns else (1.0,)
     return [
-        (components, float(alpha))
+        (components, float(scale), float(alpha))
         for components in config.pca_components
+        for scale in scales
         for alpha in config.ridge_alphas
     ]
+
+
+class _BandedSolvers:
+    """One ridge factorisation per band scale for a fold's (already standardised) design.
+
+    Without a band this is one ``_RidgeSVD``. With one, a wide design (kernel route) computes ``X X^T``
+    once, splits off the band's part ``B B^T`` and factorises ``K_rest + s^2 B B^T`` for each scale, so a
+    scale costs an eigendecomposition, not another pass over the wide matrix. A narrow design scales the
+    band columns and takes the SVD route.
+    """
+
+    def __init__(self, x_fit: np.ndarray, x_predict: np.ndarray, band_columns: Sequence[int]):
+        self.x_fit, self.x_predict = x_fit, x_predict
+        self.band = np.asarray(sorted(set(int(c) for c in band_columns)), dtype=np.int64)
+        if self.band.size and self.band.max() >= x_fit.shape[1]:
+            raise ValueError(f"band column {self.band.max()} is outside the {x_fit.shape[1]}-column design")
+        self.kernel = bool(self.band.size) and x_fit.shape[1] > x_fit.shape[0]
+        if self.kernel:
+            gram, cross = _gram(x_fit, x_predict)
+            band_fit = np.asarray(x_fit[:, self.band], dtype=np.float64)
+            band_predict = np.asarray(x_predict[:, self.band], dtype=np.float64)
+            self.gram_band = band_fit @ band_fit.T
+            self.cross_band = band_predict @ band_fit.T
+            self.gram_rest = gram - self.gram_band
+            self.cross_rest = cross - self.cross_band
+            del gram, cross
+
+    def solver(self, scale: float) -> "_RidgeSVD":
+        if not self.band.size:
+            return _RidgeSVD(self.x_fit, self.x_predict)
+        if self.kernel:
+            factor = float(scale) ** 2
+            return _RidgeSVD.from_gram(self.gram_rest + factor * self.gram_band,
+                                       self.cross_rest + factor * self.cross_band)
+        x_fit = np.array(self.x_fit, dtype=np.float32, copy=True)
+        x_predict = np.array(self.x_predict, dtype=np.float32, copy=True)
+        x_fit[:, self.band] *= float(scale)
+        x_predict[:, self.band] *= float(scale)
+        return _RidgeSVD(x_fit, x_predict, method="svd")
 
 
 def _select_grid_per_voxel(
@@ -249,18 +302,18 @@ def _select_grid_per_voxel(
         component_cache = {}
         factor_cache = {}
         scores = np.full((len(candidates), y_train.shape[1]), np.nan, dtype=np.float32)
-        for candidate_index, (components, alpha) in enumerate(candidates):
+        for candidate_index, (components, scale, alpha) in enumerate(candidates):
             if components not in component_cache:
-                component_cache[components] = _pca_train_apply(
-                    x_train_z, x_validation_z, components
-                )
-            x_fit, x_predict = component_cache[components]
-            if components not in factor_cache:
-                # One factorisation and one target projection per PCA size;
-                # each alpha is then only a rescaling of the singular values.
-                solver = _RidgeSVD(x_fit, x_predict)
-                factor_cache[components] = (solver, solver.project(y_fit))
-            solver, projected = factor_cache[components]
+                x_fit, x_predict = _pca_train_apply(x_train_z, x_validation_z, components)
+                component_cache[components] = _BandedSolvers(x_fit, x_predict, config.band_columns)
+            if (components, scale) not in factor_cache:
+                # One factorisation and one target projection per PCA size and band scale; each
+                # alpha is then only a rescaling of the singular values. Candidates come grouped by
+                # (PCA size, scale), so only the current factorisation is kept in memory.
+                factor_cache.clear()
+                solver = component_cache[components].solver(scale)
+                factor_cache[(components, scale)] = (solver, solver.project(y_fit))
+            solver, projected = factor_cache[(components, scale)]
             prediction = solver.predict(y_fit, alpha, projected=projected)
             if base_prediction.size:
                 prediction = prediction + base_prediction
@@ -294,6 +347,7 @@ def _fit_observed(
     outer_r2 = np.full_like(outer_corr, np.nan)
     outer_alpha = np.full_like(outer_corr, np.nan)
     outer_pca = np.full_like(outer_corr, np.nan)
+    outer_scale = np.full_like(outer_corr, np.nan)
     predictions = []
     observed = []
     test_run_indices = []
@@ -317,20 +371,22 @@ def _fit_observed(
 
         component_cache = {}
         factor_cache = {}
-        for candidate_index, (components, alpha) in enumerate(candidates):
+        for candidate_index, (components, scale, alpha) in enumerate(candidates):
             target_mask = selected == candidate_index
             if not np.any(target_mask):
                 continue
             if components not in component_cache:
-                component_cache[components] = _pca_train_apply(x_train_z, x_test_z, components)
-            x_fit, x_predict = component_cache[components]
-            if components not in factor_cache:
-                factor_cache[components] = _RidgeSVD(x_fit, x_predict)
-            prediction_z[:, target_mask] += factor_cache[components].predict(
+                x_fit, x_predict = _pca_train_apply(x_train_z, x_test_z, components)
+                component_cache[components] = _BandedSolvers(x_fit, x_predict, config.band_columns)
+            if (components, scale) not in factor_cache:
+                factor_cache.clear()
+                factor_cache[(components, scale)] = component_cache[components].solver(scale)
+            prediction_z[:, target_mask] += factor_cache[(components, scale)].predict(
                 y_fit[:, target_mask], alpha
             )
             outer_alpha[fold_index, target_mask] = alpha
             outer_pca[fold_index, target_mask] = 0 if components is None else components
+            outer_scale[fold_index, target_mask] = scale
 
         outer_corr[fold_index] = voxelwise_correlation(y_test_z, prediction_z)
         outer_r2[fold_index] = voxelwise_r2(y_test_z, prediction_z)
@@ -358,6 +414,7 @@ def _fit_observed(
         outer_r2=outer_r2,
         outer_alpha=outer_alpha,
         outer_pca=outer_pca,
+        outer_scale=outer_scale,
         observed=tuple(observed),
         predicted=tuple(predictions),
         test_run_indices=tuple(test_run_indices),
@@ -458,6 +515,7 @@ def fit_encoding(
         null_standardized_effect_fisher_z=np.asarray(effect, dtype=np.float32),
         empirical_p=np.asarray(empirical_p, dtype=np.float32),
         signed_z=np.asarray(signed_z, dtype=np.float32),
+        outer_selected_scale=observed.outer_scale if config.band_columns else None,
         metadata={
             "schema_version": "encoding_v1",
             "cv_scheme": cv_plan.scheme,

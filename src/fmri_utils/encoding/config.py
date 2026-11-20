@@ -28,6 +28,13 @@ class EncodingConfig:
     remaining columns then fit what it leaves, and a prediction is the sum of
     the two. Use it for a few strong regressors -- an event's on/off response,
     say -- that would otherwise be shrunk along with many weak ones.
+
+    ``band_columns`` and ``band_scales`` make the ridge banded (two penalties): after the per-fold
+    standardisation, the listed columns of the feature matrix as the model sees it (after lags) are
+    multiplied by a scale ``s`` from ``band_scales``. Ridge with penalty ``alpha`` on the scaled design is
+    ridge with penalty ``alpha`` on the other columns and ``alpha / s**2`` on the band, so the grid over
+    ``(s, alpha)``, selected per voxel in the inner folds like alpha alone, is banded ridge. Include
+    ``0.0`` to let a voxel drop the band. Needs ``pca_components=(None,)`` and no unpenalised base.
     """
 
     lags: Tuple[int, ...] = (2, 3, 4, 5)
@@ -49,6 +56,8 @@ class EncodingConfig:
     n_permutations: int = 0
     permutation_block_length: int = 24
     random_seed: int = 0
+    band_columns: Tuple[int, ...] = ()
+    band_scales: Tuple[float, ...] = (1.0,)
 
     def validate(self) -> None:
         if len(self.lags) == 0 or any(lag < 0 for lag in self.lags):
@@ -74,6 +83,15 @@ class EncodingConfig:
             raise ValueError("outer_splits and inner_splits must both be >= 2")
         if self.unpenalized_features < 0:
             raise ValueError("unpenalized_features must be >= 0")
+        if len(self.band_scales) == 0 or any(scale < 0 for scale in self.band_scales):
+            raise ValueError("band_scales must contain non-negative values")
+        if self.band_columns:
+            if tuple(self.pca_components) != (None,):
+                raise ValueError("band_columns needs pca_components=(None,)")
+            if self.unpenalized_features:
+                raise ValueError("band_columns cannot be combined with unpenalized_features")
+            if any(column < 0 for column in self.band_columns):
+                raise ValueError("band_columns must be non-negative indices")
         if self.embargo_rows < 0:
             raise ValueError("embargo_rows must be >= 0")
         if self.mask_strategy not in {

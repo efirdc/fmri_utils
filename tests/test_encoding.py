@@ -472,5 +472,61 @@ class RidgeKernelRouteTest(unittest.TestCase):
                 np.testing.assert_allclose(kernel.predict(y_train, alpha), expected, rtol=1e-4, atol=1e-5)
 
 
+class BandedRidgeTest(unittest.TestCase):
+    def test_band_scale_is_a_separate_penalty(self):
+        from fmri_utils.encoding.model import _BandedSolvers
+        rng = np.random.default_rng(1)
+        band = [3, 11]
+        for rows, columns in ((40, 300), (60, 25)):  # kernel route, then SVD route
+            x_train = rng.standard_normal((rows, columns)).astype(np.float32)
+            x_test = rng.standard_normal((15, columns)).astype(np.float32)
+            y_train = rng.standard_normal((rows, 5)).astype(np.float32)
+            solvers = _BandedSolvers(x_train, x_test, band)
+            self.assertEqual(solvers.kernel, columns > rows)
+            x, y, xt = x_train.astype(np.float64), y_train.astype(np.float64), x_test.astype(np.float64)
+            rest = np.setdiff1d(np.arange(columns), band)
+            for scale in (0.0, 0.5, 3.0):
+                solver = solvers.solver(scale)
+                for alpha in (0.1, 10.0, 1e3):
+                    if scale == 0.0:  # the band is dropped: ridge on the other columns
+                        a = x[:, rest]
+                        expected = xt[:, rest] @ np.linalg.solve(a.T @ a + alpha * np.eye(rest.size), a.T @ y)
+                    else:  # penalty alpha on the rest, alpha / scale^2 on the band
+                        penalty = np.full(columns, alpha)
+                        penalty[band] = alpha / scale**2
+                        expected = xt @ np.linalg.solve(x.T @ x + np.diag(penalty), x.T @ y)
+                    np.testing.assert_allclose(solver.predict(y_train, alpha), expected, rtol=1e-4, atol=1e-5)
+
+    def test_fit_encoding_selects_band_scale(self):
+        from fmri_utils.encoding.config import EncodingConfig
+        rng = np.random.default_rng(2)
+        n_runs, rows, columns = 4, 30, 12
+        signal = rng.standard_normal((n_runs * rows, 1))
+        features = rng.standard_normal((n_runs * rows, columns)).astype(np.float32)
+        features[:, -1] = signal[:, 0]  # the band column carries the signal
+        bold = np.hstack([signal + 0.3 * rng.standard_normal((n_runs * rows, 1)),
+                          rng.standard_normal((n_runs * rows, 2))]).astype(np.float32)
+        runs = [EncodingRun(run_id=f"r{i}", features=features[i * rows:(i + 1) * rows],
+                            bold=bold[i * rows:(i + 1) * rows], nuisance=np.empty((rows, 0), np.float32),
+                            source_rows=np.arange(rows, dtype=np.int32)) for i in range(n_runs)]
+        data = SubjectData(subject_id="s", runs=runs, mask=np.ones((1, 1, 3), bool),
+                           reference_image=nib.Nifti1Image(np.zeros((1, 1, 3), np.float32), np.eye(4)),
+                           voxel_indices=np.arange(3))
+        base = dict(lags=(0,), ridge_alphas=(1.0, 100.0, 1e4), pca_components=(None,),
+                    add_run_intercept=False, cv_scheme="leave_one_run_out", outer_splits=4, inner_splits=3)
+        plain = fit_encoding(data, EncodingConfig(**base))
+        same = fit_encoding(data, EncodingConfig(**base, band_columns=(columns - 1,), band_scales=(1.0,)))
+        np.testing.assert_allclose(same.mean_correlation, plain.mean_correlation, rtol=1e-5, atol=1e-6)
+        self.assertIsNone(plain.outer_selected_scale)
+        banded = fit_encoding(data, EncodingConfig(**base, band_columns=(columns - 1,),
+                                                   band_scales=(0.0, 1.0, 10.0)))
+        self.assertEqual(banded.outer_selected_scale.shape, banded.outer_selected_alpha.shape)
+        self.assertTrue(np.all(np.isin(banded.outer_selected_scale, (0.0, 1.0, 10.0))))
+        self.assertGreater(float(np.mean(banded.outer_selected_scale[:, 0])), 1.0)
+        self.assertGreaterEqual(banded.mean_correlation[0], plain.mean_correlation[0] - 0.02)
+        with self.assertRaises(ValueError):
+            EncodingConfig(**{**base, "pca_components": (5,)}, band_columns=(0,)).validate()
+
+
 if __name__ == "__main__":
     unittest.main()
