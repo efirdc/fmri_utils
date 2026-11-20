@@ -481,7 +481,8 @@ class BandedRidgeTest(unittest.TestCase):
             x_train = rng.standard_normal((rows, columns)).astype(np.float32)
             x_test = rng.standard_normal((15, columns)).astype(np.float32)
             y_train = rng.standard_normal((rows, 5)).astype(np.float32)
-            solvers = _BandedSolvers(x_train, x_test, band)
+            from fmri_utils.encoding.config import EncodingConfig
+            solvers = _BandedSolvers(x_train, x_test, EncodingConfig(pca_components=(None,), band_columns=tuple(band)))
             self.assertEqual(solvers.kernel, columns > rows)
             x, y, xt = x_train.astype(np.float64), y_train.astype(np.float64), x_test.astype(np.float64)
             rest = np.setdiff1d(np.arange(columns), band)
@@ -526,6 +527,79 @@ class BandedRidgeTest(unittest.TestCase):
         self.assertGreaterEqual(banded.mean_correlation[0], plain.mean_correlation[0] - 0.02)
         with self.assertRaises(ValueError):
             EncodingConfig(**{**base, "pca_components": (5,)}, band_columns=(0,)).validate()
+
+
+class GatedBandTest(unittest.TestCase):
+    def test_gated_band_matches_explicit_products(self):
+        from fmri_utils.encoding.config import EncodingConfig
+        from fmri_utils.encoding.model import _BandedSolvers
+        rng = np.random.default_rng(3)
+        # Two blocks (one per lag), one extra column per lag, and one gate per lag at the end.
+        blocks, gates = ((0, 6), (7, 13)), (14, 15)
+        for rows in (40, 200):  # narrow designs: the explicit SVD route
+            columns = 16
+            x_fit = rng.standard_normal((rows, columns)).astype(np.float32)
+            x_predict = rng.standard_normal((12, columns)).astype(np.float32)
+            raw_fit, raw_predict = x_fit.copy(), x_predict.copy()
+            raw_fit[:, gates] = rng.uniform(0, 1, (rows, 2)) * (rng.uniform(size=(rows, 2)) > 0.5)
+            raw_predict[:, gates] = rng.uniform(0, 1, (12, 2))
+            y = rng.standard_normal((rows, 4)).astype(np.float32)
+            config = EncodingConfig(lags=(0,), pca_components=(None,), gate_columns=gates, gated_blocks=blocks,
+                                    band_scales=(0.0, 0.7, 3.0))
+            solvers = _BandedSolvers(x_fit, x_predict, config, raw_fit, raw_predict)
+            keep = [c for c in range(columns) if c not in gates]
+            def explicit(x, raw, scale):
+                g = [x[:, a:b].astype(np.float64) * raw[:, [gates[k]]].astype(np.float64) for k, (a, b) in enumerate(blocks)]
+                return np.hstack([x[:, keep].astype(np.float64), *(scale * m for m in g)])
+            for scale in (0.0, 0.7, 3.0):
+                a, at = explicit(x_fit, raw_fit, scale), explicit(x_predict, raw_predict, scale)
+                for alpha in (0.5, 50.0):
+                    expected = at @ np.linalg.solve(a.T @ a + alpha * np.eye(a.shape[1]), a.T @ y.astype(np.float64))
+                    np.testing.assert_allclose(solvers.solver(scale).predict(y, alpha), expected, rtol=1e-4, atol=1e-5)
+        # The kernel route (a design wider than its rows: zero columns pad it) against the explicit route.
+        rows, columns = 20, 16
+        x_fit = rng.standard_normal((rows, columns)).astype(np.float32)
+        x_predict = rng.standard_normal((5, columns)).astype(np.float32)
+        raw_fit, raw_predict = x_fit.copy(), x_predict.copy()
+        raw_fit[:, gates] = rng.uniform(0, 1, (rows, 2))
+        raw_predict[:, gates] = rng.uniform(0, 1, (5, 2))
+        y = rng.standard_normal((rows, 3)).astype(np.float32)
+        config = EncodingConfig(lags=(0,), pca_components=(None,), gate_columns=gates, gated_blocks=blocks)
+        solvers = _BandedSolvers(x_fit, x_predict, config, raw_fit, raw_predict)
+        self.assertFalse(solvers.kernel)
+        explicit_pred = solvers.solver(2.0).predict(y, 5.0)
+        kernel = _BandedSolvers(np.hstack([x_fit, np.zeros((rows, 10), np.float32)]),
+                                np.hstack([x_predict, np.zeros((5, 10), np.float32)]),
+                                config, np.hstack([raw_fit, np.zeros((rows, 10), np.float32)]),
+                                np.hstack([raw_predict, np.zeros((5, 10), np.float32)]))
+        self.assertTrue(kernel.kernel)
+        np.testing.assert_allclose(kernel.solver(2.0).predict(y, 5.0), explicit_pred, rtol=1e-4, atol=1e-5)
+
+    def test_fit_encoding_with_gated_band(self):
+        from fmri_utils.encoding.config import EncodingConfig
+        rng = np.random.default_rng(4)
+        n_runs, rows, width = 4, 40, 6
+        x = rng.standard_normal((n_runs * rows, width))
+        gate = (rng.uniform(size=n_runs * rows) > 0.5).astype(float)
+        signal = (x[:, 0] * gate)  # the response depends on feature 0 only while the gate is on
+        features = np.hstack([x, gate[:, None]]).astype(np.float32)
+        bold = np.column_stack([signal + 0.3 * rng.standard_normal(n_runs * rows),
+                                rng.standard_normal(n_runs * rows)]).astype(np.float32)
+        runs = [EncodingRun(run_id=f"r{i}", features=features[i * rows:(i + 1) * rows],
+                            bold=bold[i * rows:(i + 1) * rows], nuisance=np.empty((rows, 0), np.float32),
+                            source_rows=np.arange(rows, dtype=np.int32)) for i in range(n_runs)]
+        data = SubjectData(subject_id="s", runs=runs, mask=np.ones((1, 1, 2), bool),
+                           reference_image=nib.Nifti1Image(np.zeros((1, 1, 2), np.float32), np.eye(4)),
+                           voxel_indices=np.arange(2))
+        base = dict(lags=(0,), ridge_alphas=(1.0, 100.0), pca_components=(None,), add_run_intercept=False,
+                    cv_scheme="leave_one_run_out", outer_splits=4, inner_splits=3)
+        plain = fit_encoding(data, EncodingConfig(**base))
+        gated = fit_encoding(data, EncodingConfig(**base, gate_columns=(width,), gated_blocks=((0, width),),
+                                                  band_scales=(0.0, 1.0, 3.0)))
+        self.assertGreater(gated.mean_correlation[0], plain.mean_correlation[0] + 0.1)
+        self.assertGreater(float(np.mean(gated.outer_selected_scale[:, 0])), 0.0)
+        with self.assertRaises(ValueError):
+            EncodingConfig(**base, gate_columns=(1,), gated_blocks=((0, 3),)).validate()
 
 
 if __name__ == "__main__":

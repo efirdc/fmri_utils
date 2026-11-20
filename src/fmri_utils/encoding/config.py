@@ -35,6 +35,13 @@ class EncodingConfig:
     ridge with penalty ``alpha`` on the other columns and ``alpha / s**2`` on the band, so the grid over
     ``(s, alpha)``, selected per voxel in the inner folds like alpha alone, is banded ridge. Include
     ``0.0`` to let a voxel drop the band. Needs ``pca_components=(None,)`` and no unpenalised base.
+
+    ``gate_columns`` and ``gated_blocks`` make the band *gated* instead: block ``k`` (columns
+    ``gated_blocks[k][0]`` to ``gated_blocks[k][1] - 1``) times gate ``k`` (column ``gate_columns[k]``), row by
+    row. The gates are read from the unstandardised features, so a gate of 0 switches its block off, and are
+    not model columns themselves; the blocks stay in the model as ordinary columns too. With lagged
+    features, give one block and one gate per lag. The same ``band_scales`` grid then applies to the gated
+    band. A plain and a gated band cannot be combined.
     """
 
     lags: Tuple[int, ...] = (2, 3, 4, 5)
@@ -58,6 +65,8 @@ class EncodingConfig:
     random_seed: int = 0
     band_columns: Tuple[int, ...] = ()
     band_scales: Tuple[float, ...] = (1.0,)
+    gate_columns: Tuple[int, ...] = ()
+    gated_blocks: Tuple[Tuple[int, int], ...] = ()
 
     def validate(self) -> None:
         if len(self.lags) == 0 or any(lag < 0 for lag in self.lags):
@@ -92,6 +101,21 @@ class EncodingConfig:
                 raise ValueError("band_columns cannot be combined with unpenalized_features")
             if any(column < 0 for column in self.band_columns):
                 raise ValueError("band_columns must be non-negative indices")
+        if self.gate_columns or self.gated_blocks:
+            if self.band_columns:
+                raise ValueError("a plain band (band_columns) and a gated band cannot be combined")
+            if len(self.gate_columns) != len(self.gated_blocks):
+                raise ValueError("give one gate column per gated block")
+            if tuple(self.pca_components) != (None,):
+                raise ValueError("a gated band needs pca_components=(None,)")
+            if self.unpenalized_features:
+                raise ValueError("a gated band cannot be combined with unpenalized_features")
+            for start, stop in self.gated_blocks:
+                if not 0 <= start < stop:
+                    raise ValueError("gated_blocks must be (start, stop) with 0 <= start < stop")
+            gates = set(self.gate_columns)
+            if any(start <= g < stop for g in gates for start, stop in self.gated_blocks):
+                raise ValueError("a gate column cannot lie inside a gated block")
         if self.embargo_rows < 0:
             raise ValueError("embargo_rows must be >= 0")
         if self.mask_strategy not in {

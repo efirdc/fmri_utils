@@ -231,7 +231,7 @@ class _RidgeSVD:
 
 def _grid(config: EncodingConfig) -> List[Tuple[Optional[int], float, float]]:
     """Every (PCA size, band scale, alpha) candidate; the scale is 1.0 when nothing is banded."""
-    scales = config.band_scales if config.band_columns else (1.0,)
+    scales = config.band_scales if (config.band_columns or config.gate_columns) else (1.0,)
     return [
         (components, float(scale), float(alpha))
         for components in config.pca_components
@@ -243,19 +243,61 @@ def _grid(config: EncodingConfig) -> List[Tuple[Optional[int], float, float]]:
 class _BandedSolvers:
     """One ridge factorisation per band scale for a fold's (already standardised) design.
 
-    Without a band this is one ``_RidgeSVD``. With one, a wide design (kernel route) computes ``X X^T``
-    once, splits off the band's part ``B B^T`` and factorises ``K_rest + s^2 B B^T`` for each scale, so a
-    scale costs an eigendecomposition, not another pass over the wide matrix. A narrow design scales the
-    band columns and takes the SVD route.
+    Without a band this is one ``_RidgeSVD``. Two kinds of band (``EncodingConfig``):
+
+    - plain (``band_columns``): those columns, scaled. A wide design (kernel route) computes ``X X^T`` once,
+      splits off the band's part ``B B^T`` and factorises ``K_rest + s^2 B B^T`` for each scale.
+    - gated (``gate_columns`` + ``gated_blocks``): the band is every column of block b multiplied, row by row,
+      by gate b, read from the *unstandardised* features (``raw_*``) so a gate of 0 switches the block off.
+      The gates are not model columns themselves. Kernel route: with ``K_b = X_b X_b^T``,
+      ``K_rest = sum_b K_b + (other columns)`` and ``K_gate = sum_b (g_b g_b^T) * K_b`` (elementwise), so the
+      gated band costs no more than the plain design.
+
+    A narrow design builds the scaled band explicitly and takes the SVD route (same predictions).
     """
 
-    def __init__(self, x_fit: np.ndarray, x_predict: np.ndarray, band_columns: Sequence[int]):
+    def __init__(self, x_fit: np.ndarray, x_predict: np.ndarray, config: "EncodingConfig",
+                 raw_fit: Optional[np.ndarray] = None, raw_predict: Optional[np.ndarray] = None):
         self.x_fit, self.x_predict = x_fit, x_predict
-        self.band = np.asarray(sorted(set(int(c) for c in band_columns)), dtype=np.int64)
-        if self.band.size and self.band.max() >= x_fit.shape[1]:
-            raise ValueError(f"band column {self.band.max()} is outside the {x_fit.shape[1]}-column design")
-        self.kernel = bool(self.band.size) and x_fit.shape[1] > x_fit.shape[0]
-        if self.kernel:
+        n_columns = x_fit.shape[1]
+        self.band = np.asarray(sorted(set(int(c) for c in config.band_columns)), dtype=np.int64)
+        self.gates = np.asarray([int(c) for c in config.gate_columns], dtype=np.int64)
+        self.blocks = [(int(a), int(b)) for a, b in config.gated_blocks]
+        for column in [*self.band.tolist(), *self.gates.tolist(), *[b - 1 for _, b in self.blocks]]:
+            if column >= n_columns:
+                raise ValueError(f"band column {column} is outside the {n_columns}-column design")
+        self.banded = bool(self.band.size or self.gates.size)
+        self.kernel = self.banded and n_columns > x_fit.shape[0]
+        if self.gates.size:
+            if raw_fit is None or raw_predict is None:
+                raise ValueError("a gated band needs the unstandardised features")
+            self.g_fit = np.asarray(raw_fit[:, self.gates], dtype=np.float64)
+            self.g_predict = np.asarray(raw_predict[:, self.gates], dtype=np.float64)
+            in_blocks = np.zeros(n_columns, dtype=bool)
+            for a, b in self.blocks:
+                in_blocks[a:b] = True
+            other = np.ones(n_columns, dtype=bool)
+            other[self.gates] = False
+            self.other = np.flatnonzero(other & ~in_blocks)
+            self.keep = np.flatnonzero(other)
+            if self.kernel:
+                n, m = x_fit.shape[0], x_predict.shape[0]
+                self.gram_rest = np.zeros((n, n)); self.cross_rest = np.zeros((m, n))
+                self.gram_band = np.zeros((n, n)); self.cross_band = np.zeros((m, n))
+                for k, (a, b) in enumerate(self.blocks):
+                    gram, cross = _gram(x_fit[:, a:b], x_predict[:, a:b])
+                    self.gram_rest += gram
+                    self.cross_rest += cross
+                    gram *= self.g_fit[:, k][:, None]; gram *= self.g_fit[:, k][None, :]
+                    cross *= self.g_predict[:, k][:, None]; cross *= self.g_fit[:, k][None, :]
+                    self.gram_band += gram
+                    self.cross_band += cross
+                    del gram, cross
+                if self.other.size:
+                    rest_fit = np.asarray(x_fit[:, self.other], dtype=np.float64)
+                    self.gram_rest += rest_fit @ rest_fit.T
+                    self.cross_rest += np.asarray(x_predict[:, self.other], dtype=np.float64) @ rest_fit.T
+        elif self.kernel:
             gram, cross = _gram(x_fit, x_predict)
             band_fit = np.asarray(x_fit[:, self.band], dtype=np.float64)
             band_predict = np.asarray(x_predict[:, self.band], dtype=np.float64)
@@ -265,13 +307,21 @@ class _BandedSolvers:
             self.cross_rest = cross - self.cross_band
             del gram, cross
 
+    def _explicit(self, x: np.ndarray, gates: np.ndarray, scale: float) -> np.ndarray:
+        gated = [x[:, a:b] * gates[:, [k]] for k, (a, b) in enumerate(self.blocks)]
+        return np.hstack([x[:, self.keep], *(float(scale) * g for g in gated)]).astype(np.float32)
+
     def solver(self, scale: float) -> "_RidgeSVD":
-        if not self.band.size:
+        if not self.banded:
             return _RidgeSVD(self.x_fit, self.x_predict)
         if self.kernel:
             factor = float(scale) ** 2
             return _RidgeSVD.from_gram(self.gram_rest + factor * self.gram_band,
                                        self.cross_rest + factor * self.cross_band)
+        if self.gates.size:
+            return _RidgeSVD(self._explicit(np.asarray(self.x_fit, np.float64), self.g_fit, scale),
+                             self._explicit(np.asarray(self.x_predict, np.float64), self.g_predict, scale),
+                             method="svd")
         x_fit = np.array(self.x_fit, dtype=np.float32, copy=True)
         x_predict = np.array(self.x_predict, dtype=np.float32, copy=True)
         x_fit[:, self.band] *= float(scale)
@@ -305,7 +355,7 @@ def _select_grid_per_voxel(
         for candidate_index, (components, scale, alpha) in enumerate(candidates):
             if components not in component_cache:
                 x_fit, x_predict = _pca_train_apply(x_train_z, x_validation_z, components)
-                component_cache[components] = _BandedSolvers(x_fit, x_predict, config.band_columns)
+                component_cache[components] = _BandedSolvers(x_fit, x_predict, config, x_train, x_validation)
             if (components, scale) not in factor_cache:
                 # One factorisation and one target projection per PCA size and band scale; each
                 # alpha is then only a rescaling of the singular values. Candidates come grouped by
@@ -377,7 +427,7 @@ def _fit_observed(
                 continue
             if components not in component_cache:
                 x_fit, x_predict = _pca_train_apply(x_train_z, x_test_z, components)
-                component_cache[components] = _BandedSolvers(x_fit, x_predict, config.band_columns)
+                component_cache[components] = _BandedSolvers(x_fit, x_predict, config, x_train, x_test)
             if (components, scale) not in factor_cache:
                 factor_cache.clear()
                 factor_cache[(components, scale)] = component_cache[components].solver(scale)
@@ -515,7 +565,7 @@ def fit_encoding(
         null_standardized_effect_fisher_z=np.asarray(effect, dtype=np.float32),
         empirical_p=np.asarray(empirical_p, dtype=np.float32),
         signed_z=np.asarray(signed_z, dtype=np.float32),
-        outer_selected_scale=observed.outer_scale if config.band_columns else None,
+        outer_selected_scale=observed.outer_scale if (config.band_columns or config.gate_columns) else None,
         metadata={
             "schema_version": "encoding_v1",
             "cv_scheme": cv_plan.scheme,
