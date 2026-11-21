@@ -49,6 +49,11 @@ class EncodingResult:
     signed_z: np.ndarray
     metadata: Dict[str, object]
     outer_selected_scale: Optional[np.ndarray] = None
+    # per_scale_outputs only, each (folds, scales, voxels): best inner score over alpha at that scale
+    # (Fisher z when fisher_z_selection), the alpha it picks, and the held-out correlation at that alpha.
+    outer_scale_inner_score: Optional[np.ndarray] = None
+    outer_scale_alpha: Optional[np.ndarray] = None
+    outer_scale_correlation: Optional[np.ndarray] = None
 
 
 @dataclass
@@ -64,6 +69,13 @@ class _ObservedFit:
     predicted: Tuple[np.ndarray, ...]
     test_run_indices: Tuple[np.ndarray, ...]
     test_source_rows: Tuple[np.ndarray, ...]
+    scale_inner_score: Optional[np.ndarray] = None
+    scale_alpha: Optional[np.ndarray] = None
+    scale_correlation: Optional[np.ndarray] = None
+
+
+def _band_scales(config: EncodingConfig) -> Tuple[float, ...]:
+    return tuple(float(s) for s in config.band_scales) if (config.band_columns or config.gate_columns) else (1.0,)
 
 
 def _stack(runs: Sequence[EncodingRun], selection: Selection, field: str) -> np.ndarray:
@@ -231,7 +243,7 @@ class _RidgeSVD:
 
 def _grid(config: EncodingConfig) -> List[Tuple[Optional[int], float, float]]:
     """Every (PCA size, band scale, alpha) candidate; the scale is 1.0 when nothing is banded."""
-    scales = config.band_scales if (config.band_columns or config.gate_columns) else (1.0,)
+    scales = _band_scales(config)
     return [
         (components, float(scale), float(alpha))
         for components in config.pca_components
@@ -329,11 +341,12 @@ class _BandedSolvers:
         return _RidgeSVD(x_fit, x_predict, method="svd")
 
 
-def _select_grid_per_voxel(
+def _inner_grid_scores(
     runs: Sequence[EncodingRun],
     inner_folds: Sequence[InnerFold],
     config: EncodingConfig,
 ) -> np.ndarray:
+    """(candidates, voxels) inner-fold score of every grid candidate, weighted over the folds."""
     candidates = _grid(config)
     fold_scores = []
     fold_weights = []
@@ -378,13 +391,20 @@ def _select_grid_per_voxel(
     finite = np.isfinite(values)
     numerator = np.sum(np.where(finite, values * weights, 0.0), axis=0)
     denominator = np.sum(np.where(finite, weights, 0.0), axis=0)
-    mean_scores = np.divide(
+    return np.divide(
         numerator,
         denominator,
         out=np.full(numerator.shape, -np.inf),
         where=denominator > 0,
     )
-    return np.argmax(mean_scores, axis=0).astype(np.int32)
+
+
+def _select_grid_per_voxel(
+    runs: Sequence[EncodingRun],
+    inner_folds: Sequence[InnerFold],
+    config: EncodingConfig,
+) -> np.ndarray:
+    return np.argmax(_inner_grid_scores(runs, inner_folds, config), axis=0).astype(np.int32)
 
 
 def _fit_observed(
@@ -398,6 +418,13 @@ def _fit_observed(
     outer_alpha = np.full_like(outer_corr, np.nan)
     outer_pca = np.full_like(outer_corr, np.nan)
     outer_scale = np.full_like(outer_corr, np.nan)
+    scales = _band_scales(config)
+    per_scale = bool(config.per_scale_outputs)
+    if per_scale:
+        n_scales, n_alphas = len(scales), len(config.ridge_alphas)
+        scale_score = np.full((n_folds, n_scales, n_voxels), np.nan, dtype=np.float32)
+        scale_alpha = np.full_like(scale_score, np.nan)
+        scale_corr = np.full_like(scale_score, np.nan)
     predictions = []
     observed = []
     test_run_indices = []
@@ -405,7 +432,14 @@ def _fit_observed(
     row_counts = []
 
     for fold_index, fold in enumerate(cv_plan.outer_folds):
-        selected = _select_grid_per_voxel(runs, fold.inner_folds, config)
+        inner_scores = _inner_grid_scores(runs, fold.inner_folds, config)
+        selected = np.argmax(inner_scores, axis=0).astype(np.int32)
+        if per_scale:
+            # Candidates are (scale, alpha) in that order (one PCA size): the best alpha at each scale.
+            by_scale = inner_scores.reshape(n_scales, n_alphas, n_voxels)
+            best_alpha = np.argmax(by_scale, axis=1)
+            scale_score[fold_index] = np.max(by_scale, axis=1)
+            scale_alpha[fold_index] = np.asarray(config.ridge_alphas, dtype=np.float32)[best_alpha]
         x_train = _stack(runs, fold.train, "features")
         y_train = _stack(runs, fold.train, "bold")
         x_test = _stack(runs, fold.test, "features")
@@ -423,6 +457,19 @@ def _fit_observed(
         factor_cache = {}
         for candidate_index, (components, scale, alpha) in enumerate(candidates):
             target_mask = selected == candidate_index
+            if per_scale:
+                s_index, a_index = divmod(candidate_index, n_alphas)
+                at_scale = best_alpha[s_index] == a_index
+                if np.any(at_scale):
+                    if components not in component_cache:
+                        x_fit, x_predict = _pca_train_apply(x_train_z, x_test_z, components)
+                        component_cache[components] = _BandedSolvers(x_fit, x_predict, config, x_train, x_test)
+                    if (components, scale) not in factor_cache:
+                        factor_cache.clear()
+                        factor_cache[(components, scale)] = component_cache[components].solver(scale)
+                    scale_corr[fold_index, s_index, at_scale] = voxelwise_correlation(
+                        y_test_z[:, at_scale],
+                        factor_cache[(components, scale)].predict(y_fit[:, at_scale], alpha))
             if not np.any(target_mask):
                 continue
             if components not in component_cache:
@@ -469,6 +516,9 @@ def _fit_observed(
         predicted=tuple(predictions),
         test_run_indices=tuple(test_run_indices),
         test_source_rows=tuple(test_source_rows),
+        scale_inner_score=scale_score if per_scale else None,
+        scale_alpha=scale_alpha if per_scale else None,
+        scale_correlation=scale_corr if per_scale else None,
     )
 
 
@@ -566,6 +616,9 @@ def fit_encoding(
         empirical_p=np.asarray(empirical_p, dtype=np.float32),
         signed_z=np.asarray(signed_z, dtype=np.float32),
         outer_selected_scale=observed.outer_scale if (config.band_columns or config.gate_columns) else None,
+        outer_scale_inner_score=observed.scale_inner_score,
+        outer_scale_alpha=observed.scale_alpha,
+        outer_scale_correlation=observed.scale_correlation,
         metadata={
             "schema_version": "encoding_v1",
             "cv_scheme": cv_plan.scheme,

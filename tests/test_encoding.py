@@ -601,6 +601,31 @@ class GatedBandTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             EncodingConfig(**base, gate_columns=(1,), gated_blocks=((0, 3),)).validate()
 
+        # per_scale_outputs: each scale's held-out r equals a fit with only that scale on the grid, and the
+        # main (per-voxel scale) result is unchanged.
+        gate_cfg = dict(gate_columns=(width,), gated_blocks=((0, width),))
+        scales = (0.0, 1.0, 3.0)
+        per = fit_encoding(data, EncodingConfig(**base, **gate_cfg, band_scales=scales, per_scale_outputs=True))
+        np.testing.assert_allclose(per.mean_correlation, gated.mean_correlation, rtol=1e-6)
+        self.assertEqual(per.outer_scale_correlation.shape, (4, 3, 2))
+        for k, scale in enumerate(scales):
+            single = fit_encoding(data, EncodingConfig(**base, **gate_cfg, band_scales=(scale,)))
+            np.testing.assert_allclose(per.outer_scale_correlation[:, k], single.outer_fold_correlation,
+                                       rtol=1e-5, atol=1e-6)
+            np.testing.assert_allclose(per.outer_scale_alpha[:, k], single.outer_selected_alpha)
+        # scale 0 is the fit without the band (and without the gate, which is not a model column)
+        no_gate = SubjectData(subject_id="s", runs=[
+            EncodingRun(run_id=r.run_id, features=r.features[:, :width], bold=r.bold, nuisance=r.nuisance,
+                        source_rows=r.source_rows) for r in runs],
+            mask=data.mask, reference_image=data.reference_image, voxel_indices=data.voxel_indices)
+        np.testing.assert_allclose(per.outer_scale_correlation[:, 0],
+                                   fit_encoding(no_gate, EncodingConfig(**base)).outer_fold_correlation,
+                                   rtol=1e-5, atol=1e-6)
+        best = np.argmax(per.outer_scale_inner_score[:, :, 0], axis=1)
+        self.assertTrue(np.all(best > 0))  # the gated voxel prefers the band in every fold's inner CV
+        with self.assertRaises(ValueError):
+            EncodingConfig(**base, per_scale_outputs=True).validate()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -42,6 +42,11 @@ class EncodingConfig:
     not model columns themselves; the blocks stay in the model as ordinary columns too. With lagged
     features, give one block and one gate per lag. The same ``band_scales`` grid then applies to the gated
     band. A plain and a gated band cannot be combined.
+
+    ``per_scale_outputs`` (banded fits only) also keeps, for every band scale, each voxel's best inner-fold
+    score over alpha and its held-out correlation at that alpha (``EncodingResult.outer_scale_*``). A caller
+    can then choose one scale for many voxels at once, from the inner scores alone, instead of a scale per
+    voxel. Scale 0 is the fit without the band.
     """
 
     lags: Tuple[int, ...] = (2, 3, 4, 5)
@@ -67,6 +72,7 @@ class EncodingConfig:
     band_scales: Tuple[float, ...] = (1.0,)
     gate_columns: Tuple[int, ...] = ()
     gated_blocks: Tuple[Tuple[int, int], ...] = ()
+    per_scale_outputs: bool = False
 
     def validate(self) -> None:
         if len(self.lags) == 0 or any(lag < 0 for lag in self.lags):
@@ -116,6 +122,8 @@ class EncodingConfig:
             gates = set(self.gate_columns)
             if any(start <= g < stop for g in gates for start, stop in self.gated_blocks):
                 raise ValueError("a gate column cannot lie inside a gated block")
+        if self.per_scale_outputs and not (self.band_columns or self.gate_columns):
+            raise ValueError("per_scale_outputs needs a band (band_columns or gate_columns)")
         if self.embargo_rows < 0:
             raise ValueError("embargo_rows must be >= 0")
         if self.mask_strategy not in {
