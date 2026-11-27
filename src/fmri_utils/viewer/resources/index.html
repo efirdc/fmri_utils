@@ -971,6 +971,13 @@
     endpoint = endpoint || state.endpoint;
     if (endpoint !== state.endpoint) return endpoint.range;
     var variant = currentVariant();
+    // A feature on a very different scale from the others (say a brain-to-brain model beside stimulus models)
+    // can carry its own window: feature_ranges[feature] = {"*": [lo, hi], "<subject>": [lo, hi]}.
+    var byFeature = variant && variant.feature_ranges && variant.feature_ranges[state.feature];
+    if (byFeature && subjectHasVariants()) {
+      var featureRange = byFeature[state.subject] || byFeature["*"];
+      if (featureRange) return featureRange;
+    }
     var ownVariant = variant && variant.subject_ranges && variant.subject_ranges[state.subject];
     if (ownVariant && subjectHasVariants()) return ownVariant;
     if (variant && variant.range && subjectHasVariants()) return variant.range;
